@@ -12,6 +12,7 @@ set "AUDIO_SERVICES_ENV_NAME=audio_services"
 set "CHATTERBOX_ENV_NAME=chatterbox"
 set "CHATTERBOX_TRAIN_ENV_NAME=chatterbox_train"
 set "POCKET_TTS_ENV_NAME=pocket_tts"
+set "KOKORO_TTS_ENV_NAME=kokoro_tts"
 set "CONFIG_FILE=%~dp0voiceforge_config.bat"
 set "ENV_CONFIG_FILE=%~dp0voiceforge_env_config.bat"
 
@@ -21,6 +22,7 @@ set "LAUNCH_AUDIO_SERVICES=1"
 set "LAUNCH_RVC=1"
 set "LAUNCH_CHATTERBOX=1"
 set "LAUNCH_POCKET_TTS=1"
+set "LAUNCH_KOKORO_TTS=1"
 set "LAUNCH_TRAINING=1"
 
 :: Environment Install Defaults (1=install, 0=skip)
@@ -30,6 +32,7 @@ set "INSTALL_AUDIO=1"
 set "INSTALL_RVC=1"
 set "INSTALL_CHATTERBOX=1"
 set "INSTALL_POCKET_TTS=1"
+set "INSTALL_KOKORO_TTS=1"
 set "INSTALL_TRAINING=0"
 
 :: Load saved preferences if config files exist
@@ -47,6 +50,7 @@ set "RVC_SERVER_PORT=8891"
 set "AUDIO_SERVICES_SERVER_PORT=8892"
 set "CHATTERBOX_SERVER_PORT=8893"
 set "POCKET_TTS_SERVER_PORT=8894"
+set "KOKORO_TTS_SERVER_PORT=8896"
 set "TRAINING_SERVER_PORT=8895"
 
 :: Find conda
@@ -98,170 +102,9 @@ echo [1] Toggle ASR Server         - Whisper + GLM-ASR
 echo [2] Toggle Audio Services     - Pre/Post processing
 echo [3] Toggle RVC Server         - Voice conversion
 echo [4] Toggle Chatterbox         - TTS
-echo [5] Toggle Pocket TTS         - Lightweight TTS
-echo [6] Toggle Training Server    - Model training
-echo.
-echo [7] Save Configuration
-echo [8] Enable All Servers
-echo [9] Disable All Servers
-echo [0] Reset to Defaults
-echo [B] Back to Main Menu (unsaved changes lost)
-echo =============================================
-echo.
-
-choice /C 1234567890B /N /M "Choose option: "
-if errorlevel 11 goto MENU
-if errorlevel 10 goto RESET_SERVERS_DEFAULT
-if errorlevel 9 goto DISABLE_ALL_SERVERS
-if errorlevel 8 goto ENABLE_ALL_SERVERS
-if errorlevel 7 goto SAVE_CONFIG
-if errorlevel 6 call :TOGGLE_SERVER LAUNCH_TRAINING
-if errorlevel 5 call :TOGGLE_SERVER LAUNCH_POCKET_TTS
-if errorlevel 4 call :TOGGLE_SERVER LAUNCH_CHATTERBOX
-if errorlevel 3 call :TOGGLE_SERVER LAUNCH_RVC
-if errorlevel 2 call :TOGGLE_SERVER LAUNCH_AUDIO_SERVICES
-if errorlevel 1 call :TOGGLE_SERVER LAUNCH_ASR
-goto CONFIGURE_SERVERS
-
-:SHOW_SERVER_STATUS
-echo Current Configuration:
-if "%LAUNCH_ASR%"=="1" (echo   [X] ASR Server         - Port %ASR_SERVER_PORT%) else (echo   [ ] ASR Server         - Port %ASR_SERVER_PORT%)
-if "%LAUNCH_AUDIO_SERVICES%"=="1" (echo   [X] Audio Services     - Port %AUDIO_SERVICES_SERVER_PORT%) else (echo   [ ] Audio Services     - Port %AUDIO_SERVICES_SERVER_PORT%)
-if "%LAUNCH_RVC%"=="1" (echo   [X] RVC Server         - Port %RVC_SERVER_PORT%) else (echo   [ ] RVC Server         - Port %RVC_SERVER_PORT%)
-if "%LAUNCH_CHATTERBOX%"=="1" (echo   [X] Chatterbox         - Port %CHATTERBOX_SERVER_PORT%) else (echo   [ ] Chatterbox         - Port %CHATTERBOX_SERVER_PORT%)
-if "%LAUNCH_POCKET_TTS%"=="1" (echo   [X] Pocket TTS         - Port %POCKET_TTS_SERVER_PORT%) else (echo   [ ] Pocket TTS         - Port %POCKET_TTS_SERVER_PORT%)
-if "%LAUNCH_TRAINING%"=="1" (echo   [X] Training Server    - Port %TRAINING_SERVER_PORT%) else (echo   [ ] Training Server    - Port %TRAINING_SERVER_PORT%)
-exit /b 0
-
-:SHOW_SAVED_STATUS
-echo.
-echo Current saved config: 
-set "ENABLED_COUNT=0"
-if "%LAUNCH_ASR%"=="1" set /a ENABLED_COUNT+=1
-if "%LAUNCH_AUDIO_SERVICES%"=="1" set /a ENABLED_COUNT+=1
-if "%LAUNCH_RVC%"=="1" set /a ENABLED_COUNT+=1
-if "%LAUNCH_CHATTERBOX%"=="1" set /a ENABLED_COUNT+=1
-if "%LAUNCH_POCKET_TTS%"=="1" set /a ENABLED_COUNT+=1
-if "%LAUNCH_TRAINING%"=="1" set /a ENABLED_COUNT+=1
-echo %ENABLED_COUNT% of 6 servers enabled
-echo (Press 3 to configure)
-exit /b 0
-
-:TOGGLE_SERVER
-set "VAR_NAME=%~1"
-if "!%VAR_NAME%!"=="1" (
-    set "%VAR_NAME%=0"
-) else (
-    set "%VAR_NAME%=1"
-)
-exit /b 0
-
-:SAVE_CONFIG
-echo.
-echo [INFO] Saving configuration to %CONFIG_FILE%...
-(
-echo @echo off
-echo :: VoiceForge Server Configuration
-echo :: Generated automatically - do not edit manually
-echo.
-echo set "LAUNCH_ASR=%LAUNCH_ASR%"
-echo set "LAUNCH_AUDIO_SERVICES=%LAUNCH_AUDIO_SERVICES%"
-echo set "LAUNCH_RVC=%LAUNCH_RVC%"
-echo set "LAUNCH_CHATTERBOX=%LAUNCH_CHATTERBOX%"
-echo set "LAUNCH_POCKET_TTS=%LAUNCH_POCKET_TTS%"
-echo set "LAUNCH_TRAINING=%LAUNCH_TRAINING%"
-) > "%CONFIG_FILE%"
-echo [INFO] Configuration saved successfully!
-echo.
-pause
-goto MENU
-
-:ENABLE_ALL_SERVERS
-set "LAUNCH_ASR=1"
-set "LAUNCH_AUDIO_SERVICES=1"
-set "LAUNCH_RVC=1"
-set "LAUNCH_CHATTERBOX=1"
-set "LAUNCH_POCKET_TTS=1"
-set "LAUNCH_TRAINING=1"
-goto CONFIGURE_SERVERS
-
-:DISABLE_ALL_SERVERS
-set "LAUNCH_ASR=0"
-set "LAUNCH_AUDIO_SERVICES=0"
-set "LAUNCH_RVC=0"
-set "LAUNCH_CHATTERBOX=0"
-set "LAUNCH_POCKET_TTS=0"
-set "LAUNCH_TRAINING=0"
-goto CONFIGURE_SERVERS
-
-:RESET_SERVERS_DEFAULT
-set "LAUNCH_ASR=1"
-set "LAUNCH_AUDIO_SERVICES=1"
-set "LAUNCH_RVC=1"
-set "LAUNCH_CHATTERBOX=1"
-set "LAUNCH_POCKET_TTS=1"
-set "LAUNCH_TRAINING=1"
-if exist "%CONFIG_FILE%" del "%CONFIG_FILE%"
-echo [INFO] Reset to defaults and removed saved config.
-timeout /t 2 /nobreak >nul
-goto CONFIGURE_SERVERS
-
-:SHOW_SERVER_STATUS
-if "%LAUNCH_ASR%"=="1" (echo [X] ASR Server         - Port %ASR_SERVER_PORT%) else (echo [ ] ASR Server         - Port %ASR_SERVER_PORT%)
-if "%LAUNCH_AUDIO_SERVICES%"=="1" (echo [X] Audio Services     - Port %AUDIO_SERVICES_SERVER_PORT%) else (echo [ ] Audio Services     - Port %AUDIO_SERVICES_SERVER_PORT%)
-if "%LAUNCH_RVC%"=="1" (echo [X] RVC Server         - Port %RVC_SERVER_PORT%) else (echo [ ] RVC Server         - Port %RVC_SERVER_PORT%)
-if "%LAUNCH_CHATTERBOX%"=="1" (echo [X] Chatterbox         - Port %CHATTERBOX_SERVER_PORT%) else (echo [ ] Chatterbox         - Port %CHATTERBOX_SERVER_PORT%)
-if "%LAUNCH_POCKET_TTS%"=="1" (echo [X] Pocket TTS         - Port %POCKET_TTS_SERVER_PORT%) else (echo [ ] Pocket TTS         - Port %POCKET_TTS_SERVER_PORT%)
-if "%LAUNCH_TRAINING%"=="1" (echo [X] Training Server    - Port %TRAINING_SERVER_PORT%) else (echo [ ] Training Server    - Port %TRAINING_SERVER_PORT%)
-exit /b 0
-
-:TOGGLE_SERVER
-set "VAR_NAME=%~1"
-if "!%VAR_NAME%!"=="1" (
-    set "%VAR_NAME%=0"
-) else (
-    set "%VAR_NAME%=1"
-)
-exit /b 0
-
-:ENABLE_ALL_SERVERS
-set "LAUNCH_ASR=1"
-set "LAUNCH_AUDIO_SERVICES=1"
-set "LAUNCH_RVC=1"
-set "LAUNCH_CHATTERBOX=1"
-set "LAUNCH_POCKET_TTS=1"
-set "LAUNCH_TRAINING=1"
-goto SERVER_SELECT_MENU
-
-:DISABLE_ALL_SERVERS
-set "LAUNCH_ASR=0"
-set "LAUNCH_AUDIO_SERVICES=0"
-set "LAUNCH_RVC=0"
-set "LAUNCH_CHATTERBOX=0"
-set "LAUNCH_POCKET_TTS=0"
-set "LAUNCH_TRAINING=0"
-goto SERVER_SELECT_MENU
-
-:: ===============================
-:: Configure Environments Menu
-:: ===============================
-:CONFIGURE_ENVS
-cls
-echo.
-echo =============================================
-echo Configure Environments to Install
-echo =============================================
-echo Toggle environments ON/OFF:
-echo.
-call :SHOW_ENV_CONFIG_STATUS
-echo.
-echo [1] Toggle Main Environment      - Required for app
-echo [2] Toggle ASR Environment       - Whisper + GLM-ASR
-echo [3] Toggle Audio Services        - Pre/Post processing
-echo [4] Toggle RVC Environment       - Voice conversion
-echo [5] Toggle Chatterbox           - TTS
-echo [6] Toggle Pocket TTS            - Lightweight TTS
-echo [7] Toggle Training Environment  - Model training
+echo [5] Toggle Pocket TTS - Lightweight TTS
+echo [6] Toggle Kokoro TTS - ONNX TTS
+echo [7] Toggle Training Environment - Model training
 echo.
 echo [8] Save Configuration
 echo [9] Enable All
@@ -278,9 +121,9 @@ if errorlevel 10 goto DISABLE_ALL_ENVS_EXCEPT_MAIN
 if errorlevel 9 goto ENABLE_ALL_ENVS
 if errorlevel 8 goto SAVE_ENV_CONFIG
 if errorlevel 7 call :TOGGLE_ENV INSTALL_TRAINING
-if errorlevel 6 call :TOGGLE_ENV INSTALL_POCKET_TTS
-if errorlevel 5 call :TOGGLE_ENV INSTALL_CHATTERBOX
-if errorlevel 4 call :TOGGLE_ENV INSTALL_RVC
+if errorlevel 6 call :TOGGLE_ENV INSTALL_KOKORO_TTS
+if errorlevel 5 call :TOGGLE_ENV INSTALL_POCKET_TTS
+if errorlevel 4 call :TOGGLE_ENV INSTALL_CHATTERBOX
 if errorlevel 3 call :TOGGLE_ENV INSTALL_AUDIO
 if errorlevel 2 call :TOGGLE_ENV INSTALL_ASR
 if errorlevel 1 call :TOGGLE_ENV INSTALL_MAIN
@@ -293,8 +136,9 @@ if "%INSTALL_ASR%"=="1" (echo   [X] ASR Environment    - Whisper + GLM-ASR) else
 if "%INSTALL_AUDIO%"=="1" (echo   [X] Audio Services     - Pre/Post processing) else (echo   [ ] Audio Services     - Pre/Post processing)
 if "%INSTALL_RVC%"=="1" (echo   [X] RVC Environment    - Voice conversion) else (echo   [ ] RVC Environment    - Voice conversion)
 if "%INSTALL_CHATTERBOX%"=="1" (echo   [X] Chatterbox         - TTS) else (echo   [ ] Chatterbox         - TTS)
-if "%INSTALL_POCKET_TTS%"=="1" (echo   [X] Pocket TTS         - Lightweight TTS) else (echo   [ ] Pocket TTS         - Lightweight TTS)
-if "%INSTALL_TRAINING%"=="1" (echo   [X] Training           - Model training) else (echo   [ ] Training           - Model training)
+if "%INSTALL_POCKET_TTS%"=="1" (echo [X] Pocket TTS - Lightweight TTS) else (echo [ ] Pocket TTS - Lightweight TTS)
+if "%INSTALL_KOKORO_TTS%"=="1" (echo [X] Kokoro TTS - ONNX TTS) else (echo [ ] Kokoro TTS - ONNX TTS)
+if "%INSTALL_TRAINING%"=="1" (echo [X] Training - Model training) else (echo [ ] Training - Model training)
 exit /b 0
 
 :SHOW_ENV_STATUS
@@ -305,8 +149,9 @@ if "%INSTALL_AUDIO%"=="1" set /a ENV_COUNT+=1
 if "%INSTALL_RVC%"=="1" set /a ENV_COUNT+=1
 if "%INSTALL_CHATTERBOX%"=="1" set /a ENV_COUNT+=1
 if "%INSTALL_POCKET_TTS%"=="1" set /a ENV_COUNT+=1
+if "%INSTALL_KOKORO_TTS%"=="1" set /a ENV_COUNT+=1
 if "%INSTALL_TRAINING%"=="1" set /a ENV_COUNT+=1
-echo Environments: %ENV_COUNT% of 7 selected
+echo Environments: %ENV_COUNT% of 8 selected
 echo (Press 2 to configure)
 exit /b 0
 
@@ -577,6 +422,19 @@ if "%LAUNCH_POCKET_TTS%"=="1" (
     )
 ) else (
     echo [SKIP] Pocket TTS Server - disabled by user
+)
+
+if "%LAUNCH_KOKORO_TTS%"=="1" (
+    if exist "%CONDA_BASE%\envs\%KOKORO_TTS_ENV_NAME%\python.exe" if exist "%~dp0app\launch\launch_kokoro_tts_server.bat" (
+        start "VoiceForge Kokoro TTS" cmd /k "%~dp0app\launch\launch_kokoro_tts_server.bat"
+        echo [INFO] Kokoro TTS Server starting on port %KOKORO_TTS_SERVER_PORT%...
+        set /a SERVICES_LAUNCHED+=1
+        timeout /t 1 /nobreak >nul
+    ) else (
+        echo [WARN] Kokoro TTS Server not available - environment or launcher missing
+    )
+) else (
+    echo [SKIP] Kokoro TTS Server - disabled by user
 )
 
 if "%LAUNCH_TRAINING%"=="1" (

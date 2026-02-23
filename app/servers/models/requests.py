@@ -27,9 +27,9 @@ class TTSRequest(BaseModel):
         default="chunked",
         description="Generation mode: 'chunked' (wait for complete) or 'streaming' (progressive)"
     )
-    tts_backend: Literal["chatterbox", "pocket_tts"] = Field(
-        default="chatterbox", 
-        description="TTS backend: chatterbox or pocket_tts"
+    tts_backend: Literal["chatterbox", "pocket_tts", "kokoro"] = Field(
+        default="chatterbox",
+        description="TTS backend: chatterbox, pocket_tts, or kokoro"
     )
     tts_batch_tokens: int = Field(default=100, description="Max tokens per TTS batch")
     tts_token_method: str = Field(default="tiktoken", description="Token counting method")
@@ -38,10 +38,16 @@ class TTSRequest(BaseModel):
     
     # Pocket TTS settings
     pocket_tts_voice: str = Field(
-        default="alba", 
+        default="alba",
         description="Voice name or path to audio prompt for Pocket TTS cloning"
     )
-    
+
+    # Kokoro TTS settings
+    kokoro_voice: str = Field(
+        default="af_sarah",
+        description="Voice preset for Kokoro TTS v1.0 (e.g., af_sarah, am_michael, bf_emma, bm_george)"
+    )
+
     # Output format
     response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = Field(
         default="mp3", 

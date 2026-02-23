@@ -128,12 +128,13 @@
                     <div class="form-group">
                         <label for="tts-backend" class="label-with-help">
                             TTS Backend
-                            <span class="help-icon" title="Select TTS engine. Chatterbox offers voice cloning with prompt audio. Pocket TTS is lightweight with built-in voices.">?</span>
+                            <span class="help-icon" title="Select TTS engine. Chatterbox offers voice cloning with prompt audio. Pocket TTS is lightweight with built-in voices. Kokoro is a fast ONNX-based TTS.">?</span>
                         </label>
-                        <select id="tts-backend" onchange="updateTTSBackendVisibility()">
-                            <option value="chatterbox">Chatterbox (Voice Cloning)</option>
-                            <option value="pocket_tts">Pocket TTS (Lightweight)</option>
-                        </select>
+            <select id="tts-backend" onchange="updateTTSBackendVisibility()">
+              <option value="chatterbox">Chatterbox (Voice Cloning)</option>
+              <option value="pocket_tts">Pocket TTS (Lightweight)</option>
+              <option value="kokoro">Kokoro (Fast ONNX)</option>
+            </select>
                     </div>
 
                     <!-- Pocket TTS Voice Selection (shown when Pocket TTS selected) -->
@@ -155,12 +156,44 @@
                                 <option value="custom">Custom (File Path)...</option>
                             </select>
                         </div>
-                        <input type="text" id="pocket-tts-voice-path" placeholder="Path to audio file for voice cloning..." style="display: none; margin-top: 8px;">
-                        <input type="hidden" id="pocket-tts-voice" value="alba">
-                        <div class="input-hint">Built-in voices or custom audio for cloning</div>
-                    </div>
+            <input type="text" id="pocket-tts-voice-path" placeholder="Path to audio file for voice cloning..." style="display: none; margin-top: 8px;">
+            <input type="hidden" id="pocket-tts-voice" value="alba">
+            <div class="input-hint">Built-in voices or custom audio for cloning</div>
+          </div>
 
-                    <div class="form-group" id="chatterbox-model-section">
+          <!-- Kokoro TTS Voice Selection (shown when Kokoro selected) -->
+          <div class="form-group" id="kokoro-tts-settings" style="display: none;">
+            <label for="kokoro-tts-voice" class="label-with-help">
+              Voice
+              <span class="help-icon" title="Select a Kokoro v1.0 voice. American English (af_*), British English (bf_* / bm_*).">?</span>
+            </label>
+            <select id="kokoro-tts-voice" style="flex: 1;">
+              <optgroup label="American English">
+                <option value="af_sarah" selected>Sarah (af)</option>
+                <option value="af_bella">Bella (af)</option>
+                <option value="af_heart">Heart (af)</option>
+                <option value="af_nicole">Nicole (af)</option>
+                <option value="af_sky">Sky (af)</option>
+                <option value="am_michael">Michael (am)</option>
+                <option value="am_echo">Echo (am)</option>
+                <option value="am_onyx">Onyx (am)</option>
+                <option value="am_fable">Fable (am)</option>
+                <option value="am_puck">Puck (am)</option>
+                <option value="am_sage">Sage (am)</option>
+              </optgroup>
+              <optgroup label="British English">
+                <option value="bf_emma">Emma (bf)</option>
+                <option value="bf_isabella">Isabella (bf)</option>
+                <option value="bf_alice">Alice (bf)</option>
+                <option value="bm_george">George (bm)</option>
+                <option value="bm_lewis">Lewis (bm)</option>
+                <option value="bm_daniel">Daniel (bm)</option>
+              </optgroup>
+            </select>
+            <div class="input-hint">Kokoro v1.0 voices</div>
+          </div>
+
+          <div class="form-group" id="chatterbox-model-section">
                         <label for="chatterbox-model" class="label-with-help">
                             Chatterbox Model
                             <span class="help-icon" title="Select which Chatterbox model to use. 'Default' uses the base pretrained model. Custom models are trained via the Training tab.">?</span>
@@ -1583,17 +1616,20 @@
             const ttsBackend = getElementValue('tts-backend') || 'chatterbox';
             const chatterboxModel = getElementValue('chatterbox-model') || null;
             
-            // Get Pocket TTS voice (use path input if custom, otherwise preset)
-            let pocketTTSVoice = 'alba';
-            const presetValue = getElementValue('pocket-tts-voice-preset');
-            if (presetValue === 'custom') {
-                const pathInput = document.getElementById('pocket-tts-voice-path');
-                pocketTTSVoice = pathInput?.value?.trim() || 'alba';
-            } else {
-                pocketTTSVoice = presetValue || 'alba';
-            }
-            
-            return {
+        // Get Pocket TTS voice (use path input if custom, otherwise preset)
+        let pocketTTSVoice = 'alba';
+        const presetValue = getElementValue('pocket-tts-voice-preset');
+        if (presetValue === 'custom') {
+          const pathInput = document.getElementById('pocket-tts-voice-path');
+          pocketTTSVoice = pathInput?.value?.trim() || 'alba';
+        } else {
+          pocketTTSVoice = presetValue || 'alba';
+        }
+
+        // Get Kokoro TTS voice
+        const kokoroVoice = getElementValue('kokoro-tts-voice') || 'af';
+
+        return {
                 input: text,
                 rvc_model: getElementChecked('enable-rvc') ? getElementValue('model-select') : null,
                 enable_rvc: getElementChecked('enable-rvc'),
@@ -1601,9 +1637,10 @@
                 enable_background: getElementChecked('enable-background'),
                 tts_mode: getElementValue('tts-mode') || 'chunked',
                 tts_backend: ttsBackend,
-                chatterbox_model: chatterboxModel,
-                pocket_tts_voice: pocketTTSVoice,
-                tts_batch_tokens: parseInt(getElementValue('tts-batch-tokens')) || 50,
+          chatterbox_model: chatterboxModel,
+          pocket_tts_voice: pocketTTSVoice,
+          kokoro_voice: kokoroVoice,
+          tts_batch_tokens: parseInt(getElementValue('tts-batch-tokens')) || 50,
                 tts_token_method: document.querySelector('input[name="token-method"]:checked')?.value || 'tiktoken',
                 pitch_algo: getElementValue('pitch-algo') || 'rmvpe+',
                 pitch_level: getIntValue('pitch-lvl', 0),
@@ -1950,26 +1987,33 @@
         })();
 
         function updateTTSBackendVisibility() {
-            const backend = document.getElementById('tts-backend')?.value || 'chatterbox';
-            const isChatterbox = backend === 'chatterbox';
-            const isPocketTTS = backend === 'pocket_tts';
-            
-            // Chatterbox sections
-            const voiceCloningSection = document.getElementById('chatterbox-voice-cloning-section');
-            if (voiceCloningSection) {
-                voiceCloningSection.style.display = isChatterbox ? 'block' : 'none';
-            }
-            
-            const chatterboxModelSection = document.getElementById('chatterbox-model-section');
-            if (chatterboxModelSection) {
-                chatterboxModelSection.style.display = isChatterbox ? 'block' : 'none';
-            }
-            
-            // Pocket TTS sections
-            const pocketTTSSettings = document.getElementById('pocket-tts-settings');
-            if (pocketTTSSettings) {
-                pocketTTSSettings.style.display = isPocketTTS ? 'block' : 'none';
-            }
+          const backend = document.getElementById('tts-backend')?.value || 'chatterbox';
+          const isChatterbox = backend === 'chatterbox';
+          const isPocketTTS = backend === 'pocket_tts';
+          const isKokoro = backend === 'kokoro';
+
+          // Chatterbox sections
+          const voiceCloningSection = document.getElementById('chatterbox-voice-cloning-section');
+          if (voiceCloningSection) {
+            voiceCloningSection.style.display = isChatterbox ? 'block' : 'none';
+          }
+
+          const chatterboxModelSection = document.getElementById('chatterbox-model-section');
+          if (chatterboxModelSection) {
+            chatterboxModelSection.style.display = isChatterbox ? 'block' : 'none';
+          }
+
+          // Pocket TTS sections
+          const pocketTTSSettings = document.getElementById('pocket-tts-settings');
+          if (pocketTTSSettings) {
+            pocketTTSSettings.style.display = isPocketTTS ? 'block' : 'none';
+          }
+
+          // Kokoro TTS sections
+          const kokoroTTSSettings = document.getElementById('kokoro-tts-settings');
+          if (kokoroTTSSettings) {
+            kokoroTTSSettings.style.display = isKokoro ? 'block' : 'none';
+          }
         }
         
         function updatePocketTTSVoice(value) {
@@ -2415,24 +2459,24 @@
                 return;
             }
 
-            // Check prompt audio requirement for Chatterbox (voice cloning)
-            const ttsBackend = getElementValue('tts-backend') || 'chatterbox';
-            
-            // Pocket TTS doesn't require prompt audio (uses built-in voices or custom path)
-            if (ttsBackend === 'pocket_tts') {
-                // No prompt audio validation needed for Pocket TTS
-            } else {
-                // Chatterbox requires prompt audio
-                const promptAudioInput = document.getElementById('chatterbox-prompt-audio');
-                const hasNewFile = promptAudioInput && promptAudioInput.files && promptAudioInput.files.length > 0;
-                const hasSavedPath = window.lastChatterboxPromptPath;
-                
-                // Voice cloning requires prompt audio
-                if (!hasNewFile && !hasSavedPath) {
-                    showToast('Voice cloning requires a prompt audio file (5+ seconds minimum, 10+ recommended)', 'warn');
-                    return;
-                }
+          // Check prompt audio requirement for Chatterbox (voice cloning)
+          const ttsBackend = getElementValue('tts-backend') || 'chatterbox';
+
+          // Pocket TTS and Kokoro don't require prompt audio (uses built-in voices)
+          if (ttsBackend === 'pocket_tts' || ttsBackend === 'kokoro') {
+            // No prompt audio validation needed for these backends
+          } else {
+            // Chatterbox requires prompt audio
+            const promptAudioInput = document.getElementById('chatterbox-prompt-audio');
+            const hasNewFile = promptAudioInput && promptAudioInput.files && promptAudioInput.files.length > 0;
+            const hasSavedPath = window.lastChatterboxPromptPath;
+
+            // Voice cloning requires prompt audio
+            if (!hasNewFile && !hasSavedPath) {
+              showToast('Voice cloning requires a prompt audio file (5+ seconds minimum, 10+ recommended)', 'warn');
+              return;
             }
+          }
 
             const generateBtn = document.getElementById('generate-btn');
             const stopBtn = document.getElementById('stop-btn');

@@ -113,6 +113,7 @@ GLMASR_SERVER_URL = normalize_base_url(os.getenv("GLMASR_SERVER_URL", ASR_SERVER
 RVC_SERVER_URL = normalize_base_url(os.getenv("RVC_SERVER_URL", "127.0.0.1:8891"))
 CHATTERBOX_SERVER_URL = normalize_base_url(os.getenv("CHATTERBOX_SERVER_URL", "127.0.0.1:8893"))
 POCKET_TTS_SERVER_URL = normalize_base_url(os.getenv("POCKET_TTS_SERVER_URL", "127.0.0.1:8894"))
+KOKORO_TTS_SERVER_URL = normalize_base_url(os.getenv("KOKORO_TTS_SERVER_URL", "127.0.0.1:8897"))
 
 AUDIO_SERVICES_SERVER_URL = normalize_base_url(os.getenv("AUDIO_SERVICES_SERVER_URL", "127.0.0.1:8892"))
 POSTPROCESS_SERVER_URL = normalize_base_url(os.getenv("POSTPROCESS_SERVER_URL", AUDIO_SERVICES_SERVER_URL))
@@ -2218,6 +2219,218 @@ class PocketTTSClient(BaseServiceClient):
             raise RuntimeError(f"Pocket TTS streaming generation failed: {e}")
 
 
+class KokoroTTSClient(BaseServiceClient):
+    """Client for the Kokoro TTS server (ONNX-based TTS).
+    
+    Kokoro TTS is a lightweight, high-quality TTS model using ONNX runtime.
+    - Multiple voice presets (af, am, bf, bm)
+    - Fast inference with ONNX runtime
+    - OpenAI-compatible /v1/audio/speech API
+    """
+    
+    # Available voice presets
+    AVAILABLE_VOICES = ["af", "am", "bf", "bm"]
+    
+    def __init__(self, server_url: str = None):
+        super().__init__(server_url or KOKORO_TTS_SERVER_URL)
+        self._server_available = None
+    
+    def is_available(self) -> bool:
+        """Check if Kokoro TTS server is available (with caching)."""
+        if self._server_available:
+            return True
+        
+        result = super().is_available()
+        if result:
+            self._server_available = True
+        return result
+    
+    def reset_availability_cache(self):
+        """Reset the availability cache."""
+        self._server_available = None
+    
+    def get_status(self) -> dict:
+        """Get server status."""
+        status = super().get_status()
+        if "model_loaded" not in status:
+            status["model_loaded"] = False
+        return status
+    
+    def get_voices(self) -> list:
+        """Get list of available voices."""
+        try:
+            response = self.session.get(f"{self.server_url}/v1/voices", timeout=5)
+            if response.status_code == 200:
+                voices = response.json().get("voices", [])
+                return [v["id"] for v in voices] if voices else self.AVAILABLE_VOICES
+            return self.AVAILABLE_VOICES
+        except Exception:
+            return self.AVAILABLE_VOICES
+    
+    def generate(
+        self,
+        text: str,
+        voice: str = "af",
+        speed: float = 1.0,
+        request_id: str = None
+    ) -> str:
+        """
+        Generate TTS audio using Kokoro.
+        
+        Args:
+            text: Text to synthesize
+            voice: Voice preset (af, am, bf, bm)
+            speed: Playback speed (0.25-4.0)
+            request_id: Optional request ID for logging
+            
+        Returns:
+            Path to output WAV file
+            
+        Raises:
+            RuntimeError: If generation fails
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            payload = {
+                "model": "kokoro-tts",
+                "input": text,
+                "voice": voice,
+                "response_format": "wav",
+                "speed": speed
+            }
+            
+            logger.info(f"[KokoroTTS] Sending request to {self.server_url}/v1/audio/speech")
+            logger.info(f"[KokoroTTS] Payload: voice={voice}, text_len={len(text)}")
+            print(f"[KokoroTTS] Sending request to {self.server_url}/v1/audio/speech")
+            
+            response = self.session.post(
+                f"{self.server_url}/v1/audio/speech",
+                json=payload,
+                timeout=3600  # 60 minute timeout for long audio
+            )
+            
+            if response.status_code != 200:
+                raise RuntimeError(f"Kokoro TTS server error: {response.status_code} - {response.text}")
+            
+            # Save response audio to temp file
+            fd, output_path = tempfile.mkstemp(suffix="_kokoro_tts.wav")
+            os.close(fd)
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+            return output_path
+            
+        except requests.exceptions.ConnectionError:
+            raise self._handle_connection_error(
+                "Kokoro TTS",
+                "Please start the Kokoro TTS server."
+            )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Kokoro TTS generation failed: {e}")
+    
+    def generate_stream(
+        self,
+        text: str,
+        voice: str = "af",
+        speed: float = 1.0,
+        request_id: str = None,
+        on_progress: Optional[Callable[[dict], None]] = None
+    ) -> str:
+        """
+        Generate TTS audio using Kokoro with progress streaming.
+        
+        Args:
+            text: Text to synthesize
+            voice: Voice preset (af, am, bf, bm)
+            speed: Playback speed (0.25-4.0)
+            request_id: Optional request ID for logging
+            on_progress: Optional callback for progress events
+            
+        Returns:
+            Path to output WAV file
+            
+        Raises:
+            RuntimeError: If generation fails
+        """
+        import logging
+        import base64
+        logger = logging.getLogger(__name__)
+        
+        try:
+            payload = {
+                "model": "kokoro-tts",
+                "input": text,
+                "voice": voice,
+                "response_format": "wav",
+                "speed": speed
+            }
+            
+            logger.info(f"[KokoroTTS] Streaming request to {self.server_url}/v1/audio/speech/stream")
+            print(f"[KokoroTTS] Streaming request to {self.server_url}/v1/audio/speech/stream")
+            
+            response = self.session.post(
+                f"{self.server_url}/v1/audio/speech/stream",
+                json=payload,
+                stream=True,
+                timeout=3600
+            )
+            
+            if response.status_code != 200:
+                raise RuntimeError(f"Kokoro TTS stream error: {response.status_code} - {response.text}")
+            
+            audio_data = b""
+            
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                
+                line = line.decode("utf-8")
+                if not line.startswith("data: "):
+                    continue
+                
+                try:
+                    event = json.loads(line[6:])
+                    event_type = event.get("type")
+                    
+                    if event_type == "chunk":
+                        chunk_audio = base64.b64decode(event.get("audio", ""))
+                        audio_data += chunk_audio
+                        if on_progress:
+                            on_progress(event)
+                    elif event_type == "complete":
+                        if on_progress:
+                            on_progress(event)
+                    elif event_type == "error":
+                        raise RuntimeError(f"Kokoro TTS error: {event.get('message')}")
+                        
+                except json.JSONDecodeError:
+                    continue
+            
+            if not audio_data:
+                raise RuntimeError("No audio data received from Kokoro TTS")
+            
+            # Save audio to temp file
+            fd, output_path = tempfile.mkstemp(suffix="_kokoro_tts.wav")
+            os.close(fd)
+            with open(output_path, "wb") as f:
+                f.write(audio_data)
+            
+            return output_path
+            
+        except requests.exceptions.ConnectionError:
+            raise self._handle_connection_error(
+                "Kokoro TTS",
+                "Please start the Kokoro TTS server."
+            )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"Kokoro TTS streaming generation failed: {e}")
+
+
 # ============================================
 # GLOBAL INSTANCES AND HELPER FUNCTIONS
 # ============================================
@@ -2228,6 +2441,7 @@ _glmasr_client = None
 _rvc_client = None
 _chatterbox_client = None
 _pocket_tts_client = None
+_kokoro_tts_client = None
 
 
 # ASR helpers (Whisper - default)
@@ -2890,6 +3104,20 @@ def is_pocket_tts_server_available() -> bool:
     return get_pocket_tts_client().is_available()
 
 
+# Kokoro TTS helpers
+def get_kokoro_tts_client() -> KokoroTTSClient:
+    """Get or create the global Kokoro TTS client."""
+    global _kokoro_tts_client
+    if _kokoro_tts_client is None:
+        _kokoro_tts_client = KokoroTTSClient()
+    return _kokoro_tts_client
+
+
+def is_kokoro_tts_server_available() -> bool:
+    """Check if Kokoro TTS server is available."""
+    return get_kokoro_tts_client().is_available()
+
+
 # Export all public symbols
 __all__ = [
     # Base
@@ -2897,9 +3125,10 @@ __all__ = [
     # Clients
     'WhisperASRClient',
     'GLMASRClient',
-    'RVCClient', 
+    'RVCClient',
     'ChatterboxClient',
     'PocketTTSClient',
+    'KokoroTTSClient',
     'PostProcessClient',
     'PreprocessClient',
     # ASR helpers (Whisper)
@@ -2935,6 +3164,9 @@ __all__ = [
     # Pocket TTS helpers
     'get_pocket_tts_client',
     'is_pocket_tts_server_available',
+    # Kokoro TTS helpers
+    'get_kokoro_tts_client',
+    'is_kokoro_tts_server_available',
     # Server URLs
     'get_shared_session',
     'WHISPERASR_SERVER_URL',
@@ -2942,5 +3174,6 @@ __all__ = [
     'RVC_SERVER_URL',
     'CHATTERBOX_SERVER_URL',
     'POCKET_TTS_SERVER_URL',
+    'KOKORO_TTS_SERVER_URL',
     'AUDIO_SERVICES_SERVER_URL',
 ]

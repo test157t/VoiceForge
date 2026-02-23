@@ -162,10 +162,11 @@ async def get_modules():
     # All services are optional - don't block connection checking them
     # Availability is determined when features are actually used
     return {
-        "rvc": True,  # Will fail gracefully if not running when used
+        "rvc": True, # Will fail gracefully if not running when used
         "postprocess": True,
         "chatterbox": True,
         "pocket_tts": True,
+        "kokoro": True,
         "asr": True,
     }
 
