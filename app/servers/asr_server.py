@@ -3,6 +3,7 @@
 Unified ASR microservice supporting multiple backends:
 - Whisper (Faster Whisper / CTranslate2)
 - GLM-ASR (zai-org/GLM-ASR-Nano-2512)
+- GLM-ASR GGUF (in-process llama.cpp via llama-cpp-python)
 
 Runs in the 'asr' conda environment.
 The main VoiceForge server calls this via HTTP.
@@ -479,6 +480,252 @@ def transcribe_with_glm(audio_path: str, model_name: str = None, language: str =
 
 
 # ==========================================
+# GLM-ASR GGUF BACKEND (llama.cpp / koboldcpp)
+# ==========================================
+
+def _parse_bool_env(name: str, default: str = "false") -> bool:
+    value = os.getenv(name, default)
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+GLM_GGUF_ENABLED = _parse_bool_env("GLM_GGUF_ENABLED", "false")
+GLM_GGUF_MODEL_PATH = os.getenv("GLM_GGUF_MODEL_PATH", "")
+GLM_GGUF_MMPROJ_PATH = os.getenv("GLM_GGUF_MMPROJ_PATH", "")
+GLM_GGUF_MODELS_DIR = APP_DIR / "models" / "glm_asr_gguf"
+GLM_GGUF_CTX_SIZE = int(os.getenv("GLM_GGUF_CTX_SIZE", "4096"))
+GLM_GGUF_GPU_LAYERS = int(os.getenv("GLM_GGUF_GPU_LAYERS", "-1"))
+GLM_GGUF_THREADS = int(os.getenv("GLM_GGUF_THREADS", "0"))
+GLM_GGUF_BATCH = int(os.getenv("GLM_GGUF_BATCH", "512"))
+GLM_GGUF_PROMPT = os.getenv(
+    "GLM_GGUF_PROMPT",
+    (
+        "Transcribe this audio faithfully. "
+        "Return only the transcription text."
+    ),
+)
+
+GLM_GGUF_AVAILABLE = False
+GLM_GGUF_ERROR = None
+try:
+    from llama_cpp import Llama
+    GLM_GGUF_AVAILABLE = True
+except Exception as e:
+    GLM_GGUF_ERROR = str(e)
+
+_glm_gguf_model = None
+_glm_gguf_model_lock = threading.Lock()
+
+
+def _discover_glm_gguf_local_files() -> tuple[str, str]:
+    """Best-effort discovery of local GGUF model and mmproj files."""
+    if not GLM_GGUF_MODELS_DIR.exists():
+        return "", ""
+
+    model_file = ""
+    mmproj_file = ""
+
+    for p in sorted(GLM_GGUF_MODELS_DIR.glob("*.gguf")):
+        name = p.name.lower()
+        if "mmproj" in name and not mmproj_file:
+            mmproj_file = str(p)
+        elif "mmproj" not in name and not model_file:
+            model_file = str(p)
+
+    return model_file, mmproj_file
+
+
+def _resolve_glm_gguf_paths() -> tuple[str, str]:
+    model_path = GLM_GGUF_MODEL_PATH
+    mmproj_path = GLM_GGUF_MMPROJ_PATH
+
+    if not model_path:
+        discovered_model, discovered_mmproj = _discover_glm_gguf_local_files()
+        model_path = discovered_model
+        if not mmproj_path:
+            mmproj_path = discovered_mmproj
+
+    if not model_path:
+        raise RuntimeError(
+            "GLM-ASR GGUF requires GLM_GGUF_MODEL_PATH or a .gguf under app/models/glm_asr_gguf"
+        )
+    if not os.path.exists(model_path):
+        raise RuntimeError(f"GLM_GGUF_MODEL_PATH not found: {model_path}")
+    if mmproj_path and not os.path.exists(mmproj_path):
+        raise RuntimeError(f"GLM_GGUF_MMPROJ_PATH not found: {mmproj_path}")
+
+    return model_path, mmproj_path
+
+
+def _load_glm_gguf_model():
+    global _glm_gguf_model
+
+    if not GLM_GGUF_ENABLED:
+        raise RuntimeError("GLM-ASR GGUF backend disabled. Set GLM_GGUF_ENABLED=true")
+    if not GLM_GGUF_AVAILABLE:
+        raise RuntimeError(f"llama-cpp-python not available: {GLM_GGUF_ERROR}")
+
+    with _glm_gguf_model_lock:
+        if _glm_gguf_model is not None:
+            return _glm_gguf_model
+
+        model_path, mmproj_path = _resolve_glm_gguf_paths()
+        log_info(f"[GLM-GGUF] Loading in-process model: {model_path}")
+
+        kwargs = {
+            "model_path": model_path,
+            "n_ctx": GLM_GGUF_CTX_SIZE,
+            "n_gpu_layers": GLM_GGUF_GPU_LAYERS,
+            "n_threads": max(GLM_GGUF_THREADS, 0) or None,
+            "n_batch": GLM_GGUF_BATCH,
+            "verbose": False,
+        }
+
+        if mmproj_path:
+            import inspect
+            params = inspect.signature(Llama.__init__).parameters
+            if "mmproj" in params:
+                kwargs["mmproj"] = mmproj_path
+            elif "mmproj_path" in params:
+                kwargs["mmproj_path"] = mmproj_path
+
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        _glm_gguf_model = Llama(**kwargs)
+        log_info("[GLM-GGUF] In-process model loaded")
+        return _glm_gguf_model
+
+
+def unload_glm_gguf_model() -> float:
+    global _glm_gguf_model
+
+    freed_gb = 0.0
+    with _glm_gguf_model_lock:
+        if _glm_gguf_model is None:
+            return freed_gb
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            before = torch.cuda.memory_allocated() / 1e9
+
+        del _glm_gguf_model
+        _glm_gguf_model = None
+
+        import gc
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            after = torch.cuda.memory_allocated() / 1e9
+            freed_gb = max(0.0, before - after)
+
+    log_info(f"[GLM-GGUF] Model unloaded, freed {freed_gb:.2f}GB")
+    return freed_gb
+
+
+def _is_glm_gguf_available() -> bool:
+    return GLM_GGUF_ENABLED and GLM_GGUF_AVAILABLE
+
+
+def _ensure_glm_gguf_ready() -> None:
+    _load_glm_gguf_model()
+
+
+def transcribe_with_glm_gguf(audio_path: str, model_name: str = None, language: str = "en") -> dict:
+    """Transcribe audio using in-process GGUF model via llama-cpp-python."""
+    llm = _load_glm_gguf_model()
+
+    audio_info = sf.info(audio_path)
+    total_duration = audio_info.duration
+
+    log_info(f"[GLM-GGUF] Transcribing: {audio_path} ({total_duration:.1f}s)")
+    t_start = time.perf_counter()
+
+    with open(audio_path, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode("ascii")
+
+    prompt = GLM_GGUF_PROMPT
+    if language and language != "auto":
+        prompt = f"{prompt} Target language: {language}."
+
+    data_uri = f"data:audio/wav;base64,{audio_b64}"
+
+    response = None
+    errors = []
+
+    try:
+        response = llm.create_chat_completion(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "input_audio", "input_audio": {"data": audio_b64, "format": "wav"}},
+                    ],
+                }
+            ],
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=1024,
+        )
+    except Exception as e:
+        errors.append(f"input_audio failed: {e}")
+
+    if response is None:
+        try:
+            response = llm.create_chat_completion(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "audio_url", "audio_url": {"url": data_uri}},
+                        ],
+                    }
+                ],
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=1024,
+            )
+        except Exception as e:
+            errors.append(f"audio_url failed: {e}")
+
+    if response is None:
+        raise RuntimeError(
+            "In-process GGUF transcription failed. "
+            "This llama-cpp-python build likely lacks audio multimodal support. "
+            + " | ".join(errors)
+        )
+
+    full_text = ""
+    try:
+        choice0 = response.get("choices", [])[0]
+        if "message" in choice0 and isinstance(choice0["message"], dict):
+            full_text = (choice0["message"].get("content") or "").strip()
+        else:
+            full_text = (choice0.get("text") or "").strip()
+    except Exception:
+        full_text = ""
+
+    t_elapsed = time.perf_counter() - t_start
+    rtf = t_elapsed / total_duration if total_duration > 0 else 0
+    log_info(f"[GLM-GGUF] Done: {len(full_text)} chars, RTF={rtf:.2f}")
+
+    segments = [{
+        "id": 0,
+        "start": 0.0,
+        "end": total_duration,
+        "text": full_text,
+    }]
+
+    return {
+        "text": full_text,
+        "segments": segments,
+        "language": language,
+        "duration": total_duration,
+    }
+
+
+# ==========================================
 # UNIFIED TRANSCRIPTION ROUTER
 # ==========================================
 
@@ -489,18 +736,30 @@ def is_glm_model(model_name: str) -> bool:
     return model_name.lower().startswith("glm")
 
 
+def is_glm_gguf_model(model_name: str) -> bool:
+    """Check if model name refers to GLM-ASR GGUF backend."""
+    if not model_name:
+        return False
+    model_lower = model_name.lower()
+    return model_lower.startswith("glm-gguf") or model_lower.startswith("glm-asr-nano-gguf")
+
+
 def transcribe(audio_path: str, model_name: str = None, language: str = "en") -> dict:
     """
     Unified transcription function that routes to the appropriate backend.
     
     Model name prefixes:
+    - "glm-gguf*" or "glm-asr-nano-gguf*" -> GLM-ASR GGUF (llama.cpp/koboldcpp)
     - "glm-*" or "glm_*" -> GLM-ASR
     - "whisper-*" or anything else -> Whisper
     """
     if model_name is None:
         model_name = f"whisper-{DEFAULT_WHISPER_MODEL}"
     
-    if is_glm_model(model_name):
+    if is_glm_gguf_model(model_name):
+        _ensure_glm_gguf_ready()
+        return transcribe_with_glm_gguf(audio_path, model_name, language)
+    elif is_glm_model(model_name):
         # Use GLM-ASR
         if not GLM_ASR_AVAILABLE:
             raise RuntimeError(f"GLM-ASR not available: {GLM_ASR_ERROR}")
@@ -599,6 +858,12 @@ app.add_middleware(
 )
 
 
+@app.on_event("shutdown")
+async def _shutdown_cleanup():
+    """Cleanup loaded GGUF model on ASR server shutdown."""
+    unload_glm_gguf_model()
+
+
 class TranscriptionResponse(BaseModel):
     text: str
 
@@ -611,6 +876,9 @@ class HealthResponse(BaseModel):
     glm_asr_available: bool
     glm_model_loaded: bool
     glm_model_name: Optional[str]
+    glm_gguf_enabled: bool
+    glm_gguf_available: bool
+    glm_gguf_loaded: bool
     cuda_available: bool
     gpu_name: Optional[str]
 
@@ -630,6 +898,9 @@ async def health_check():
         glm_asr_available=GLM_ASR_AVAILABLE,
         glm_model_loaded=_glm_model is not None,
         glm_model_name=_glm_model_name,
+        glm_gguf_enabled=GLM_GGUF_ENABLED,
+        glm_gguf_available=_is_glm_gguf_available(),
+        glm_gguf_loaded=_glm_gguf_model is not None,
         cuda_available=torch.cuda.is_available(),
         gpu_name=gpu_name,
     )
@@ -639,7 +910,10 @@ async def health_check():
 async def warmup(model: str = None):
     """Pre-load ASR model for faster first inference."""
     try:
-        if model and is_glm_model(model):
+        if model and is_glm_gguf_model(model):
+            _ensure_glm_gguf_ready()
+            return {"status": "ok", "message": "GLM-ASR GGUF model loaded", "backend": "glm-gguf"}
+        elif model and is_glm_model(model):
             load_glm_model()
             return {"status": "ok", "message": "GLM-ASR model loaded", "backend": "glm"}
         else:
@@ -689,6 +963,10 @@ async def unload_model(backend: str = None):
     if backend is None or backend == "glm":
         freed += unload_glm_model()
         messages.append("GLM-ASR unloaded")
+
+    if backend == "glm-gguf":
+        freed += unload_glm_gguf_model()
+        messages.append("GLM-ASR GGUF unloaded")
     
     return {"success": True, "message": ", ".join(messages), "freed_gb": round(freed, 2)}
 
@@ -709,6 +987,18 @@ async def get_model_info():
             "model_name": _glm_model_name,
             "model_id": GLM_ASR_MODEL_ID,
             "available_models": ["glm-asr-nano"],
+        },
+        "glm_asr_gguf": {
+            "enabled": GLM_GGUF_ENABLED,
+            "available": _is_glm_gguf_available(),
+            "loaded": _glm_gguf_model is not None,
+            "configured_model_path": GLM_GGUF_MODEL_PATH or None,
+            "configured_mmproj_path": GLM_GGUF_MMPROJ_PATH or None,
+            "models_dir": str(GLM_GGUF_MODELS_DIR),
+            "ctx_size": GLM_GGUF_CTX_SIZE,
+            "gpu_layers": GLM_GGUF_GPU_LAYERS,
+            "batch": GLM_GGUF_BATCH,
+            "available_models": ["glm-asr-nano-gguf", "glm-gguf"],
         }
     }
 
@@ -747,10 +1037,18 @@ async def live_transcription_websocket(
     log_info(f"[LIVE] WebSocket connected, model={model}, language={language}, call_mode={call_mode}")
     
     effective_model = model or f"whisper-{DEFAULT_WHISPER_MODEL}"
+    use_glm_gguf = is_glm_gguf_model(effective_model)
     use_glm = is_glm_model(effective_model)
     
     # Check backend availability
-    if use_glm and not GLM_ASR_AVAILABLE:
+    if use_glm_gguf:
+        try:
+            _ensure_glm_gguf_ready()
+        except Exception as e:
+            await websocket.send_json({"type": "error", "message": str(e)})
+            await websocket.close()
+            return
+    elif use_glm and not GLM_ASR_AVAILABLE:
         await websocket.send_json({"type": "error", "message": f"GLM-ASR not available: {GLM_ASR_ERROR}"})
         await websocket.close()
         return
@@ -953,6 +1251,7 @@ def transcribe_streaming(
         update_queue.put({"type": type_, **data})
     
     # Determine backend
+    use_glm_gguf = is_glm_gguf_model(model_name) if model_name else False
     use_glm = is_glm_model(model_name) if model_name else False
     
     # Load audio
@@ -961,10 +1260,25 @@ def transcribe_streaming(
         audio_data = np.mean(audio_data, axis=1)
     
     total_duration = len(audio_data) / sr
-    backend_name = "GLM-ASR" if use_glm else "WHISPER"
+    if use_glm_gguf:
+        backend_name = "GLM-GGUF"
+    elif use_glm:
+        backend_name = "GLM-ASR"
+    else:
+        backend_name = "WHISPER"
     log_info(f"[{backend_name}-STREAM] Transcribing: {audio_path} ({total_duration:.1f}s)")
     t_start = time.perf_counter()
     
+    # GGUF backend uses single-pass in-process inference
+    if use_glm_gguf:
+        send_update("status", {"message": "Transcribing with GLM-ASR GGUF...", "progress": 10})
+        result = transcribe(audio_path, model_name, language)
+        full_text = result.get("text", "")
+        send_update("text", {"text": full_text, "chunk_text": full_text, "chunk_idx": 0, "duration_processed": total_duration})
+        send_update("progress", {"progress": 100, "duration_processed": total_duration})
+        send_update("complete", {"text": full_text})
+        return full_text
+
     # Chunked processing for real-time updates
     chunk_duration = 30.0  # seconds per chunk
     overlap_duration = 2.0  # overlap between chunks
@@ -1101,7 +1415,12 @@ async def transcribe_stream_endpoint(
     effective_model = model or f"whisper-{DEFAULT_WHISPER_MODEL}"
     
     # Check backend availability
-    if is_glm_model(effective_model):
+    if is_glm_gguf_model(effective_model):
+        try:
+            _ensure_glm_gguf_ready()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=str(e))
+    elif is_glm_model(effective_model):
         if not GLM_ASR_AVAILABLE:
             raise HTTPException(status_code=503, detail=f"GLM-ASR not available: {GLM_ASR_ERROR}")
     else:
@@ -1239,7 +1558,8 @@ async def transcribe_endpoint(
     Transcribe audio. Compatible with OpenAI API format.
     
     Supported models:
-    - "glm-asr-nano": GLM-ASR-Nano-2512 (1.5B params, excellent for dialects & whisper)
+    - "glm-asr-nano": GLM-ASR-Nano-2512 via transformers (~3GB)
+    - "glm-asr-nano-gguf" or "glm-gguf": GLM-ASR-Nano GGUF via llama.cpp/koboldcpp (lower VRAM)
     - "whisper-large-v3-turbo": Whisper large-v3-turbo (default)
     - "whisper-large-v3", "whisper-medium", "whisper-small", etc.
     """
@@ -1247,7 +1567,12 @@ async def transcribe_endpoint(
     effective_model = model or f"whisper-{DEFAULT_WHISPER_MODEL}"
     
     # Check backend availability
-    if is_glm_model(effective_model):
+    if is_glm_gguf_model(effective_model):
+        try:
+            _ensure_glm_gguf_ready()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=str(e))
+    elif is_glm_model(effective_model):
         if not GLM_ASR_AVAILABLE:
             raise HTTPException(status_code=503, detail=f"GLM-ASR not available: {GLM_ASR_ERROR}")
     else:
@@ -1384,7 +1709,9 @@ if __name__ == "__main__":
     if args.warmup:
         log_info("Warming up model...")
         try:
-            if args.warmup_model and is_glm_model(args.warmup_model):
+            if args.warmup_model and is_glm_gguf_model(args.warmup_model):
+                _ensure_glm_gguf_ready()
+            elif args.warmup_model and is_glm_model(args.warmup_model):
                 load_glm_model()
             else:
                 load_whisper_model()
@@ -1395,6 +1722,10 @@ if __name__ == "__main__":
     log_info(f"Starting server on {args.host}:{args.port}")
     log_info(f"Whisper available: {FASTER_WHISPER_AVAILABLE}")
     log_info(f"GLM-ASR available: {GLM_ASR_AVAILABLE}")
+    log_info(f"GLM-ASR GGUF enabled: {GLM_GGUF_ENABLED}")
+    if GLM_GGUF_ENABLED:
+        log_info(f"GLM-ASR GGUF available: {GLM_GGUF_AVAILABLE}")
+        log_info(f"GLM-ASR GGUF model path: {GLM_GGUF_MODEL_PATH or '(auto-discover)'}")
     
     uvicorn.run(
         app,

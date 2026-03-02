@@ -21,12 +21,16 @@ import os
 import tempfile
 import hashlib
 import json
+import time
+import re
 from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# phonemizer can emit noisy mismatch warnings even when synthesis succeeds
+logging.getLogger("phonemizer").setLevel(logging.ERROR)
 
 # Global model instance
 kokoro_pipeline = None
@@ -147,6 +151,8 @@ class TTSRequest(BaseModel):
     voice: str = Field(default=DEFAULT_VOICE, description="Voice to use")
     response_format: str = Field(default="wav", description="Audio format: wav, mp3, opus")
     speed: float = Field(default=1.0, ge=0.25, le=4.0, description="Playback speed (0.25-4.0)")
+    max_tokens: int = Field(default=50, ge=5, le=200, description="Max tokens per text chunk")
+    token_method: str = Field(default="tiktoken", description="Token counting method: tiktoken or words")
 
 
 class TTSStreamRequest(BaseModel):
@@ -158,6 +164,44 @@ class TTSStreamRequest(BaseModel):
     voice: str = Field(default=DEFAULT_VOICE, description="Voice to use")
     response_format: str = Field(default="wav")
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    max_tokens: int = Field(default=50, ge=5, le=200)
+    token_method: str = Field(default="tiktoken")
+
+
+def split_text_into_chunks(text: str, max_tokens: int = 50, token_method: str = "tiktoken") -> List[str]:
+    """Split text into chunks using shared utility."""
+    import sys
+
+    util_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "util")
+    if util_path not in sys.path:
+        sys.path.insert(0, util_path)
+
+    from text_utils import split_text, count_tokens, get_tokenizer
+
+    normalized_text = normalize_kokoro_text(text)
+    method = token_method if token_method in {"tiktoken", "words"} else "tiktoken"
+    if method == "tiktoken" and get_tokenizer() is None:
+        logger.warning("tiktoken not available in Kokoro env, falling back to word approximation")
+    chunks = split_text(normalized_text, max_tokens=max_tokens, token_method=method)
+    chunks = [chunk for chunk in chunks if chunk and chunk.strip()]
+
+    if chunks:
+        max_seen = max(count_tokens(chunk, method) for chunk in chunks)
+        logger.info(
+            f"Chunking produced {len(chunks)} chunks (target={max_tokens}, method={method}, max_seen={max_seen})"
+        )
+    return chunks
+
+
+def normalize_kokoro_text(text: str) -> str:
+    """Normalize text before phonemization to reduce parser mismatches."""
+    if not text:
+        return ""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[\u200B-\u200D\uFEFF]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 @app.exception_handler(RequestValidationError)
@@ -267,13 +311,44 @@ async def create_speech(request: TTSRequest):
     Returns audio as binary response.
     """
     try:
-        samples, sample_rate = synthesize_speech(
-            text=request.input,
-            voice=request.voice,
-            speed=request.speed
+        chunks = split_text_into_chunks(
+            request.input,
+            max_tokens=request.max_tokens,
+            token_method=request.token_method,
         )
-        
-        audio_bytes = encode_audio(samples, sample_rate, request.response_format)
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No valid text to synthesize")
+
+        logger.info(
+            f"Generating {len(chunks)} Kokoro chunk(s) from {len(request.input)} chars "
+            f"(max_tokens={request.max_tokens}, token_method={request.token_method})"
+        )
+
+        all_samples = []
+        sample_rate = None
+        for idx, chunk in enumerate(chunks, start=1):
+            try:
+                samples, sr = synthesize_speech(
+                    text=chunk,
+                    voice=request.voice,
+                    speed=request.speed
+                )
+                if len(samples) == 0:
+                    logger.warning(f"[{idx}/{len(chunks)}] Empty chunk output, skipping")
+                    continue
+                all_samples.append(samples)
+                if sample_rate is None:
+                    sample_rate = sr
+            except Exception as e:
+                logger.error(f"[{idx}/{len(chunks)}] Chunk synthesis failed: {e}")
+                continue
+
+        if not all_samples or sample_rate is None:
+            raise HTTPException(status_code=500, detail="No audio chunks generated")
+
+        combined_samples = np.concatenate(all_samples)
+
+        audio_bytes = encode_audio(combined_samples, sample_rate, request.response_format)
         
         content_type = {
             "wav": "audio/wav",
@@ -306,26 +381,62 @@ async def create_speech_stream(request: TTSStreamRequest):
     """
     async def stream_generator():
         try:
-            # Start event
-            yield f"data: {json.dumps({'type': 'start', 'voice': request.voice})}\n\n"
-            
-            # Generate full audio (kokoro doesn't support true streaming)
-            samples, sample_rate = synthesize_speech(
-                text=request.input,
-                voice=request.voice,
-                speed=request.speed
-            )
-            
-            # Encode to WAV
             import base64
-            audio_bytes = encode_audio(samples, sample_rate, "wav")
-            
-            # Send as single chunk
-            audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-            yield f"data: {json.dumps({'type': 'chunk', 'audio': audio_b64, 'sample_rate': sample_rate})}\n\n"
-            
-            # Complete event
-            yield f"data: {json.dumps({'type': 'complete', 'sample_rate': sample_rate, 'total_samples': len(samples)})}\n\n"
+
+            chunks = split_text_into_chunks(
+                request.input,
+                max_tokens=request.max_tokens,
+                token_method=request.token_method,
+            )
+            if not chunks:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'No valid text to synthesize'})}\n\n"
+                return
+
+            logger.info(
+                f"Streaming {len(chunks)} Kokoro chunk(s) from {len(request.input)} chars "
+                f"(max_tokens={request.max_tokens}, token_method={request.token_method})"
+            )
+
+            yield f"data: {json.dumps({'type': 'start', 'voice': request.voice, 'chunks': len(chunks)})}\n\n"
+
+            chunks_sent = 0
+            total_samples = 0
+            sample_rate = None
+            start_time = time.time()
+
+            for idx, chunk in enumerate(chunks):
+                try:
+                    samples, sr = synthesize_speech(
+                        text=chunk,
+                        voice=request.voice,
+                        speed=request.speed
+                    )
+
+                    if len(samples) == 0:
+                        yield f"data: {json.dumps({'type': 'warning', 'message': f'Chunk {idx + 1} returned empty audio'})}\n\n"
+                        continue
+
+                    audio_bytes = encode_audio(samples, sr, "wav")
+                    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+                    duration = len(samples) / sr if sr else 0.0
+
+                    yield f"data: {json.dumps({'type': 'chunk', 'index': idx, 'audio_bytes_b64': audio_b64, 'sample_rate': sr, 'duration': round(duration, 2), 'text_preview': chunk[:50] + '...' if len(chunk) > 50 else chunk})}\n\n"
+
+                    chunks_sent += 1
+                    total_samples += len(samples)
+                    if sample_rate is None:
+                        sample_rate = sr
+
+                except Exception as e:
+                    logger.error(f"[{idx + 1}/{len(chunks)}] Streaming chunk synthesis failed: {e}")
+                    yield f"data: {json.dumps({'type': 'warning', 'message': f'Chunk {idx + 1} failed: {str(e)}'})}\n\n"
+
+            if chunks_sent == 0:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'No audio chunks generated'})}\n\n"
+                return
+
+            total_time = time.time() - start_time
+            yield f"data: {json.dumps({'type': 'complete', 'sample_rate': sample_rate, 'total_samples': total_samples, 'chunks_sent': chunks_sent, 'total_time': round(total_time, 2)})}\n\n"
             
         except Exception as e:
             logger.error(f"Streaming failed: {e}")

@@ -196,6 +196,8 @@ async def generate_audio(
             kokoro_tts = get_kokoro_tts_client()
             print(f"[{request_id}] Kokoro TTS client URL: {kokoro_tts.server_url}")
             status("Generating TTS with Kokoro...")
+            max_tokens = request.tts_batch_tokens or 50
+            token_method = request.tts_token_method or "tiktoken"
 
             tts_path = await asyncio.get_event_loop().run_in_executor(
                 executor,
@@ -203,6 +205,8 @@ async def generate_audio(
                     text=request.input,
                     voice=kokoro_voice,
                     speed=getattr(request, 'speed', 1.0),
+                    max_tokens=max_tokens,
+                    token_method=token_method,
                 )
             )
             print(f"[{request_id}] Kokoro TTS generated: {tts_path}")
@@ -526,13 +530,17 @@ async def generate_audio_streaming(
 
                     kokoro_tts = get_kokoro_tts_client()
                     kokoro_voice = getattr(request, 'kokoro_voice', 'af_sarah')
+                    max_tokens = request.tts_batch_tokens or 50
+                    token_method = request.tts_token_method or "tiktoken"
 
                     payload = {
                         "model": "kokoro-tts",
                         "input": request.input,
                         "voice": kokoro_voice,
                         "response_format": "wav",
-                        "speed": getattr(request, 'speed', 1.0)
+                        "speed": getattr(request, 'speed', 1.0),
+                        "max_tokens": max_tokens,
+                        "token_method": token_method,
                     }
 
                     print(f"[{request_id}] KokoroTTS streaming - voice={kokoro_voice}")

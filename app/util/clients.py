@@ -460,8 +460,12 @@ class GLMASRClient(BaseServiceClient):
     def is_available(self) -> bool:
         """Check if GLM-ASR server is available."""
         status = self.get_status()
-        # GLM-ASR reports as whisper_available for compatibility
-        return status.get("whisper_available", False) or status.get("glm_asr_available", False)
+        # Unified ASR server can expose GLM backends in multiple forms
+        return (
+            status.get("whisper_available", False)
+            or status.get("glm_asr_available", False)
+            or status.get("glm_gguf_available", False)
+        )
     
     def get_status(self) -> dict:
         """Get GLM-ASR server status."""
@@ -471,6 +475,8 @@ class GLMASRClient(BaseServiceClient):
             status["glm_asr_available"] = False
         if "glm_model_loaded" not in status:
             status["glm_model_loaded"] = False
+        if "glm_gguf_available" not in status:
+            status["glm_gguf_available"] = False
         return status
     
     def transcribe(
@@ -2272,6 +2278,8 @@ class KokoroTTSClient(BaseServiceClient):
         text: str,
         voice: str = "af",
         speed: float = 1.0,
+        max_tokens: int = 50,
+        token_method: str = "tiktoken",
         request_id: str = None
     ) -> str:
         """
@@ -2281,6 +2289,8 @@ class KokoroTTSClient(BaseServiceClient):
             text: Text to synthesize
             voice: Voice preset (af, am, bf, bm)
             speed: Playback speed (0.25-4.0)
+            max_tokens: Max tokens per text chunk
+            token_method: Token counting method (tiktoken or words)
             request_id: Optional request ID for logging
             
         Returns:
@@ -2298,7 +2308,9 @@ class KokoroTTSClient(BaseServiceClient):
                 "input": text,
                 "voice": voice,
                 "response_format": "wav",
-                "speed": speed
+                "speed": speed,
+                "max_tokens": max_tokens,
+                "token_method": token_method,
             }
             
             logger.info(f"[KokoroTTS] Sending request to {self.server_url}/v1/audio/speech")
@@ -2336,6 +2348,8 @@ class KokoroTTSClient(BaseServiceClient):
         text: str,
         voice: str = "af",
         speed: float = 1.0,
+        max_tokens: int = 50,
+        token_method: str = "tiktoken",
         request_id: str = None,
         on_progress: Optional[Callable[[dict], None]] = None
     ) -> str:
@@ -2346,6 +2360,8 @@ class KokoroTTSClient(BaseServiceClient):
             text: Text to synthesize
             voice: Voice preset (af, am, bf, bm)
             speed: Playback speed (0.25-4.0)
+            max_tokens: Max tokens per text chunk
+            token_method: Token counting method (tiktoken or words)
             request_id: Optional request ID for logging
             on_progress: Optional callback for progress events
             
@@ -2365,7 +2381,9 @@ class KokoroTTSClient(BaseServiceClient):
                 "input": text,
                 "voice": voice,
                 "response_format": "wav",
-                "speed": speed
+                "speed": speed,
+                "max_tokens": max_tokens,
+                "token_method": token_method,
             }
             
             logger.info(f"[KokoroTTS] Streaming request to {self.server_url}/v1/audio/speech/stream")
@@ -2396,7 +2414,8 @@ class KokoroTTSClient(BaseServiceClient):
                     event_type = event.get("type")
                     
                     if event_type == "chunk":
-                        chunk_audio = base64.b64decode(event.get("audio", ""))
+                        chunk_b64 = event.get("audio", "") or event.get("audio_bytes_b64", "")
+                        chunk_audio = base64.b64decode(chunk_b64) if chunk_b64 else b""
                         audio_data += chunk_audio
                         if on_progress:
                             on_progress(event)
