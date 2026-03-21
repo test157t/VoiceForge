@@ -911,7 +911,6 @@
                         <select id="transcribe-model" aria-label="Model" onchange="updateModelHints()">
                             <optgroup label="🧠 GLM-ASR (Z.ai)">
                                 <option value="glm-asr-nano">GLM-ASR Nano (~3GB, best for quiet speech & dialects)</option>
-                                <option value="glm-asr-nano-gguf">GLM-ASR Nano GGUF (llama.cpp, lower VRAM, experimental)</option>
                             </optgroup>
                             <optgroup label="🎙️ Whisper (OpenAI)">
                                 <option value="whisper-large-v3-turbo" selected>Whisper Large V3 Turbo (~1.5GB, best speed/quality)</option>
@@ -920,7 +919,7 @@
                                 <option value="whisper-small">Whisper Small (~0.5GB, fast)</option>
                             </optgroup>
                         </select>
-                        <div class="input-hint" id="model-hint">Whisper: Best general-purpose ASR. GLM-ASR: Excels at whispered/quiet speech and Cantonese dialect. GGUF mode can reduce VRAM.</div>
+                        <div class="input-hint" id="model-hint">Whisper: Best general-purpose ASR. GLM-ASR: Excels at whispered/quiet speech and Cantonese dialect.</div>
                     </div>
                     
                     <div class="form-group" style="margin-top: 8px;" id="transcribe-language-group">
@@ -3664,14 +3663,8 @@
             const autoOption = document.querySelector('#transcribe-language option[value="auto"]');
             
             const isGLM = model.startsWith('glm');
-            const isGGUF = model.startsWith('glm-gguf') || model.startsWith('glm-asr-nano-gguf');
-            
             if (isGLM) {
-                if (isGGUF) {
-                    modelHint.textContent = '🧠 GLM-ASR GGUF: Lower VRAM mode via llama.cpp/koboldcpp. Great for quiet speech and dialects; quality/speed depends on quant + server settings.';
-                } else {
-                    modelHint.textContent = '🧠 GLM-ASR: Best for quiet/whispered speech, low-volume audio, and Cantonese dialect. Outperforms Whisper V3 on key benchmarks.';
-                }
+                modelHint.textContent = '🧠 GLM-ASR: Best for quiet/whispered speech, low-volume audio, and Cantonese dialect. Outperforms Whisper V3 on key benchmarks.';
                 languageHint.textContent = 'GLM-ASR is optimized for English, Mandarin Chinese, and Cantonese (粤语).';
                 // Disable auto-detect for GLM-ASR
                 autoOption.disabled = true;

@@ -464,7 +464,6 @@ class GLMASRClient(BaseServiceClient):
         return (
             status.get("whisper_available", False)
             or status.get("glm_asr_available", False)
-            or status.get("glm_gguf_available", False)
         )
     
     def get_status(self) -> dict:
@@ -475,8 +474,6 @@ class GLMASRClient(BaseServiceClient):
             status["glm_asr_available"] = False
         if "glm_model_loaded" not in status:
             status["glm_model_loaded"] = False
-        if "glm_gguf_available" not in status:
-            status["glm_gguf_available"] = False
         return status
     
     def transcribe(

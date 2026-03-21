@@ -17,7 +17,6 @@ echo =============================================
 echo   Backends:
 echo   - Whisper (Faster Whisper / CTranslate2)
 echo   - GLM-ASR (zai-org/GLM-ASR-Nano-2512)
-echo   - GLM-ASR GGUF (in-process via llama-cpp-python)
 echo =============================================
 echo.
 
@@ -115,13 +114,6 @@ if errorlevel 1 (
     echo [WARN] Transformers may not be properly installed. GLM-ASR requires transformers from source.
 )
 
-:: Verify llama-cpp-python installation
-echo [INFO] Verifying llama-cpp-python installation (for GGUF backend)...
-python -c "from llama_cpp import Llama; print('llama-cpp-python OK')" 2>nul
-if errorlevel 1 (
-    echo [WARN] llama-cpp-python may not be properly installed. GGUF backend may be unavailable.
-)
-
 echo.
 echo [INFO] ASR environment setup complete!
 echo [INFO] Environment name: %ASR_ENV_NAME%
@@ -129,7 +121,6 @@ echo.
 echo [NOTE] Models will be downloaded on first use:
 echo        - Whisper models cached in: app\models\whisper
 echo        - GLM-ASR model (~3GB) cached in: app\models\glm_asr
-echo        - GLM-ASR GGUF local files: app\models\glm_asr_gguf
 exit /b 0
 
 :: ===============================

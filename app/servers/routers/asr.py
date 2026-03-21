@@ -104,8 +104,7 @@ async def transcribe_audio_endpoint(
     Args:
         audio: Audio file to transcribe
         clean_vocals: Whether to clean vocals first with UVR5
-        model: ASR model to use. Use "glm-asr-nano" (transformers) or
-               "glm-asr-nano-gguf"/"glm-gguf" (llama.cpp) for GLM-ASR,
+        model: ASR model to use. Use "glm-asr-nano" (transformers)
                or "whisper-large-v3-turbo" etc. for Whisper
         language: Language code (e.g., 'en', 'es', 'zh')
     """
@@ -171,7 +170,6 @@ async def create_transcription(
     
     Supported models:
     - "glm-asr-nano": GLM-ASR-Nano-2512 via transformers
-    - "glm-asr-nano-gguf" / "glm-gguf": GLM-ASR-Nano GGUF via llama.cpp/koboldcpp
     - "whisper-large-v3-turbo": Whisper large-v3-turbo (default)
     - "whisper-large-v3": Whisper large-v3
     - "whisper-medium", "whisper-small", "whisper-base", "whisper-tiny": Other Whisper sizes

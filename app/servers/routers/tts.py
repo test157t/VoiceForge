@@ -203,7 +203,9 @@ async def generate_speech_stream(
     # Use client-provided request_id if available
     request_id = request.request_id or str(uuid.uuid4())[:8]
     
-    print(f"[{request_id}] === REQUEST ARRIVED at {arrival_time:.3f} === input: \"{request.input[:50]}...\"")
+    # Log exact input text (repr) so debugging is unambiguous.
+    # Do not append artificial ellipsis here.
+    print(f"[{request_id}] === REQUEST ARRIVED at {arrival_time:.3f} === input_len={len(request.input)} input={request.input!r}")
     
     if not request.input or not request.input.strip():
         raise HTTPException(status_code=400, detail="Input text cannot be empty")
