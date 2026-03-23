@@ -775,7 +775,7 @@
             <div class="scrollable">
                 <div class="card-section">
                     <div class="section-header">Speech-to-Text Transcription</div>
-                    <p style="color: var(--text-muted); margin-bottom: 20px;">Transcribe audio using <strong>Whisper</strong> (OpenAI) or <strong>GLM-ASR</strong> (Z.ai). GLM-ASR excels at quiet/whispered speech and dialects like Cantonese. Supports WAV, MP3, FLAC, and other common formats.</p>
+                    <p style="color: var(--text-muted); margin-bottom: 20px;">Transcribe audio using <strong>Whisper</strong> (OpenAI), <strong>GLM-ASR</strong> (Z.ai), or <strong>Parakeet</strong> (NVIDIA). GLM-ASR excels at quiet/whispered speech and dialects like Cantonese. Parakeet provides a CPU-friendly backend for live/callmode workflows.</p>
                     
                     <div class="form-group">
                         <label class="label-with-help">
@@ -906,11 +906,16 @@
                     <div class="form-group" style="margin-top: 8px;">
                         <label for="transcribe-model" class="label-with-help">
                             ASR Model
-                            <span class="help-icon" title="Choose between Whisper (OpenAI) or GLM-ASR (Z.ai). GLM-ASR excels at low-volume/whisper speech and dialects.">?</span>
+                            <span class="help-icon" title="Choose between Whisper (OpenAI), GLM-ASR (Z.ai), or Parakeet (NVIDIA). GLM-ASR excels at low-volume/whisper speech and dialects; Parakeet is CPU-friendly.">?</span>
                         </label>
                         <select id="transcribe-model" aria-label="Model" onchange="updateModelHints()">
                             <optgroup label="🧠 GLM-ASR (Z.ai)">
                                 <option value="glm-asr-nano">GLM-ASR Nano (~3GB, best for quiet speech & dialects)</option>
+                            </optgroup>
+                            <optgroup label="🦜 Parakeet (NVIDIA)">
+                                <option value="parakeet-tdt-0.6b-v2">Parakeet TDT 0.6B v2 (CPU-friendly)</option>
+                                <option value="parakeet-tdt-0.6b-v3">Parakeet TDT 0.6B v3 (newer, CPU-friendly)</option>
+                                <option value="parakeet-rnnt-1.1b">Parakeet RNNT 1.1B (higher quality, heavier)</option>
                             </optgroup>
                             <optgroup label="🎙️ Whisper (OpenAI)">
                                 <option value="whisper-large-v3-turbo" selected>Whisper Large V3 Turbo (~1.5GB, best speed/quality)</option>
@@ -919,16 +924,16 @@
                                 <option value="whisper-small">Whisper Small (~0.5GB, fast)</option>
                             </optgroup>
                         </select>
-                        <div class="input-hint" id="model-hint">Whisper: Best general-purpose ASR. GLM-ASR: Excels at whispered/quiet speech and Cantonese dialect.</div>
+                        <div class="input-hint" id="model-hint">Whisper: Best general-purpose ASR. GLM-ASR: Excels at whispered/quiet speech and Cantonese dialect. Parakeet: CPU-friendly backend.</div>
                     </div>
                     
                     <div class="form-group" style="margin-top: 8px;" id="transcribe-language-group">
                         <label for="transcribe-language" class="label-with-help">
                             Language
-                            <span class="help-icon" title="Audio language. Auto-detect works with Whisper. GLM-ASR excels at Chinese (including Cantonese) and English.">?</span>
+                            <span class="help-icon" title="Audio language. Auto-detect works with Whisper and Parakeet. GLM-ASR excels at Chinese (including Cantonese) and English.">?</span>
                         </label>
                         <select id="transcribe-language" aria-label="Language">
-                            <option value="auto">Auto-detect (Whisper only)</option>
+                            <option value="auto">Auto-detect (Whisper/Parakeet)</option>
                             <option value="en" selected>English</option>
                             <option value="es">Spanish</option>
                             <option value="fr">French</option>
@@ -959,7 +964,7 @@
                             <option value="hu">Hungarian</option>
                             <option value="ro">Romanian</option>
                         </select>
-                        <div class="input-hint" id="language-hint">Whisper: 90+ languages with auto-detect. GLM-ASR: Optimized for English, Mandarin, and Cantonese.</div>
+                        <div class="input-hint" id="language-hint">Whisper: 90+ languages with auto-detect. GLM-ASR: Optimized for English, Mandarin, and Cantonese. Parakeet: strong multilingual support depending on selected model.</div>
                     </div>
                     
                     <div class="form-group" style="margin-top: 8px;">
@@ -2060,22 +2065,21 @@
                 console.log('Training server not available, trying Chatterbox server...');
             }
             
-            // Fallback to Chatterbox server if no models found
+            // Fallback to main server proxy (avoids browser console errors when Chatterbox is offline)
             if (chatterboxModels.length === 0) {
                 try {
-                    const res = await fetch(`${CHATTERBOX_URL}/v1/models`);
+                    const res = await fetch('/api/custom-models');
                     if (res.ok) {
                         const data = await res.json();
-                        // Chatterbox server returns models in a different format
-                        const customModels = (data.models || []).filter(m => m.type === 'custom' && m.valid);
+                        const customModels = data.chatterbox || [];
                         chatterboxModels = customModels.map(m => ({
                             name: m.name,
                             path: m.path,
-                            files: m.checkpoint_files
+                            files: m.checkpoint_files || m.files || 0
                         }));
                     }
                 } catch (e) {
-                    console.log('Could not fetch models from Chatterbox server:', e);
+                    console.log('Could not fetch models from main server proxy:', e);
                 }
             }
             
@@ -2152,6 +2156,10 @@
             
             // Update TTS backend visibility after settings are loaded
             updateTTSBackendVisibility();
+
+            // Initialize transcription model list and preferences
+            await refreshAsrModels();
+            loadTranscribePreferences();
             
             // Load custom model lists after initialization (servers should be ready by now)
             await refreshChatterboxModels();
@@ -3569,9 +3577,10 @@
             const icons = { info: 'ℹ️', success: '✅', warn: '⚠️', error: '❌' };
             toast.textContent = `${icons[type] || 'ℹ️'} ${message}`;
             toast.className = `toast show ${type}`;
+            const duration = type === 'error' ? 9000 : 4000;
             setTimeout(() => {
                 toast.classList.remove('show');
-            }, 4000);
+            }, duration);
         }
         
         // Toggle Spatial Audio Advanced Panel
@@ -3655,29 +3664,121 @@
             }
         });
 
-        // Update hints based on selected ASR model
+        function getAsrBackendFromModel(model) {
+            if (model.startsWith('glm')) return 'glm';
+            if (model.startsWith('parakeet')) return 'parakeet';
+            return 'whisper';
+        }
+
+        function getAsrModelLabel(model) {
+            const known = {
+                'glm-asr-nano': 'GLM-ASR Nano (~3GB, best for quiet speech & dialects)',
+                'parakeet-tdt-0.6b-v2': 'Parakeet TDT 0.6B v2 (CPU-friendly)',
+                'parakeet-tdt-0.6b-v3': 'Parakeet TDT 0.6B v3 (newer, CPU-friendly)',
+                'parakeet-rnnt-1.1b': 'Parakeet RNNT 1.1B (higher quality, heavier)',
+                'whisper-large-v3-turbo': 'Whisper Large V3 Turbo (~1.5GB, best speed/quality)',
+                'whisper-large-v3': 'Whisper Large V3 (~3GB, highest quality)',
+                'whisper-medium': 'Whisper Medium (~1.5GB)',
+                'whisper-small': 'Whisper Small (~0.5GB, fast)',
+                'whisper-base': 'Whisper Base',
+                'whisper-tiny': 'Whisper Tiny'
+            };
+            return known[model] || model;
+        }
+
         function updateModelHints() {
             const model = document.getElementById('transcribe-model').value;
             const modelHint = document.getElementById('model-hint');
             const languageHint = document.getElementById('language-hint');
             const autoOption = document.querySelector('#transcribe-language option[value="auto"]');
-            
-            const isGLM = model.startsWith('glm');
-            if (isGLM) {
-                modelHint.textContent = '🧠 GLM-ASR: Best for quiet/whispered speech, low-volume audio, and Cantonese dialect. Outperforms Whisper V3 on key benchmarks.';
+            const backend = getAsrBackendFromModel(model);
+
+            if (backend === 'glm') {
+                modelHint.textContent = '🧠 GLM-ASR: Best for quiet/whispered speech, low-volume audio, and Cantonese dialect.';
                 languageHint.textContent = 'GLM-ASR is optimized for English, Mandarin Chinese, and Cantonese (粤语).';
-                // Disable auto-detect for GLM-ASR
                 autoOption.disabled = true;
-                autoOption.textContent = 'Auto-detect (Whisper only)';
-                // If auto was selected, switch to English
+                autoOption.textContent = 'Auto-detect (Whisper/Parakeet only)';
                 if (document.getElementById('transcribe-language').value === 'auto') {
                     document.getElementById('transcribe-language').value = 'en';
                 }
+            } else if (backend === 'parakeet') {
+                modelHint.textContent = '🦜 Parakeet: CPU-friendly backend for stable live/callmode workflows.';
+                languageHint.textContent = 'Parakeet supports multilingual transcription; performance depends on selected model.';
+                autoOption.disabled = false;
+                autoOption.textContent = 'Auto-detect';
             } else {
                 modelHint.textContent = '🎙️ Whisper: Best general-purpose ASR with excellent multilingual support and auto-detection.';
                 languageHint.textContent = 'Whisper supports 90+ languages including auto-detection.';
                 autoOption.disabled = false;
                 autoOption.textContent = 'Auto-detect';
+            }
+        }
+
+        async function refreshAsrModels() {
+            const modelSelect = document.getElementById('transcribe-model');
+            if (!modelSelect) return;
+
+            const previous = modelSelect.value;
+
+            try {
+                const response = await fetch('/v1/asr/model_info');
+                if (!response.ok) return;
+
+                const modelInfo = await response.json();
+                const groups = [
+                    {
+                        label: '🧠 GLM-ASR (Z.ai)',
+                        backendKey: 'glm_asr',
+                        normalize: (m) => m,
+                    },
+                    {
+                        label: '🦜 Parakeet (NVIDIA)',
+                        backendKey: 'parakeet',
+                        normalize: (m) => m,
+                    },
+                    {
+                        label: '🎙️ Whisper (OpenAI)',
+                        backendKey: 'whisper',
+                        normalize: (m) => m.startsWith('whisper-') ? m : `whisper-${m}`,
+                    }
+                ];
+
+                modelSelect.innerHTML = '';
+
+                for (const groupCfg of groups) {
+                    const backend = modelInfo[groupCfg.backendKey] || {};
+                    const availableModels = Array.isArray(backend.available_models) ? backend.available_models : [];
+                    if (availableModels.length === 0) continue;
+
+                    const optgroup = document.createElement('optgroup');
+                    optgroup.label = groupCfg.label;
+
+                    for (const rawModel of availableModels) {
+                        const modelValue = groupCfg.normalize(rawModel);
+                        const option = document.createElement('option');
+                        option.value = modelValue;
+                        option.textContent = getAsrModelLabel(modelValue);
+                        optgroup.appendChild(option);
+                    }
+
+                    modelSelect.appendChild(optgroup);
+                }
+
+                if (modelSelect.options.length === 0) {
+                    return;
+                }
+
+                const hasPrevious = Array.from(modelSelect.options).some(opt => opt.value === previous);
+                if (hasPrevious) {
+                    modelSelect.value = previous;
+                } else {
+                    const hasDefaultWhisper = Array.from(modelSelect.options).some(opt => opt.value === 'whisper-large-v3-turbo');
+                    modelSelect.value = hasDefaultWhisper ? 'whisper-large-v3-turbo' : modelSelect.options[0].value;
+                }
+            } catch (error) {
+                console.warn('Failed to refresh ASR model list:', error);
+            } finally {
+                updateModelHints();
             }
         }
 
@@ -3711,15 +3812,12 @@
                     if (prefs.postprocessAudio !== undefined) document.getElementById('postprocess-audio').checked = prefs.postprocessAudio;
                     if (prefs.skipExistingVocals !== undefined) document.getElementById('skip-existing-vocals').checked = prefs.skipExistingVocals;
                 }
-                // Update hints based on loaded model (handles both Whisper and GLM-ASR)
+                // Update hints based on loaded model (Whisper/GLM-ASR/Parakeet)
                 updateModelHints();
             } catch (e) {
                 console.warn('Failed to load transcribe preferences:', e);
             }
         }
-        
-        // Load preferences on page load
-        document.addEventListener('DOMContentLoaded', loadTranscribePreferences);
 
         // ==========================================
         // MICROPHONE RECORDING
@@ -3806,10 +3904,11 @@
                 // Get model and language
                 const model = document.getElementById('transcribe-model').value;
                 const language = document.getElementById('transcribe-language').value;
+                let asrBaseUrl = null;
                 
                 document.getElementById('live-status-text').textContent = 'Checking server...';
                 
-                // Check if ASR server is running first
+                // Check if ASR server is reachable and selected backend is available
                 try {
                     const healthResp = await fetch('/v1/asr/health');
                     if (!healthResp.ok) {
@@ -3818,16 +3917,42 @@
                         return;
                     }
                     const health = await healthResp.json();
-                    if (health.status !== 'healthy') {
-                        showToast('ASR server is not healthy. Check server logs.', 'error');
-                        document.getElementById('live-status-text').textContent = 'Server unhealthy';
+                    const selectedBackend = getAsrBackendFromModel(model);
+                    const healthKey = selectedBackend === 'parakeet' ? 'whisper' : selectedBackend;
+                    const backendStatus = health.backends?.[healthKey];
+                    if (!backendStatus || backendStatus.status === 'unavailable' || backendStatus.status === 'error') {
+                        showToast(`${selectedBackend.toUpperCase()} backend is not available. Check ASR server logs.`, 'error');
+                        document.getElementById('live-status-text').textContent = 'Backend unavailable';
                         return;
                     }
+                    asrBaseUrl = backendStatus.url || `http://${window.location.hostname}:8889`;
                 } catch (e) {
                     console.error('[LIVE] Health check failed:', e);
                     showToast('Cannot reach ASR server. Make sure ASR server is running (launcher option 4).', 'error');
                     document.getElementById('live-status-text').textContent = 'Server offline';
                     return;
+                }
+
+                // Verify selected model/backend is available on ASR server
+                try {
+                    const infoResp = await fetch('/v1/asr/model_info');
+                    if (infoResp.ok) {
+                        const modelInfo = await infoResp.json();
+                        const selectedBackend = getAsrBackendFromModel(model);
+                        const infoKey = selectedBackend === 'glm' ? 'glm_asr' : selectedBackend;
+                        const backendInfo = modelInfo[infoKey] || {};
+                        const available = backendInfo.available !== false;
+                        const availableModels = Array.isArray(backendInfo.available_models) ? backendInfo.available_models : [];
+                        const normalizedModel = model.startsWith('whisper-') ? model.replace('whisper-', '') : model;
+                        const modelFound = availableModels.length === 0 || availableModels.includes(model) || availableModels.includes(normalizedModel);
+                        if (!available || !modelFound) {
+                            showToast(`Selected model is not available on server: ${model}`, 'error');
+                            document.getElementById('live-status-text').textContent = 'Model unavailable';
+                            return;
+                        }
+                    }
+                } catch (e) {
+                    console.warn('[LIVE] Model info check failed:', e);
                 }
                 
                 document.getElementById('live-status-text').textContent = 'Requesting microphone...';
@@ -3857,17 +3982,12 @@
                 source.connect(liveScriptProcessor);
                 liveScriptProcessor.connect(liveAudioContext.destination);
                 
-                // Connect to WebSocket on appropriate ASR server
-                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                
-                // Select ASR server port based on model:
-                // - GLM-ASR runs on port 8890
-                // - Whisper runs on port 8889
-                const isGLM = model.startsWith('glm');
-                const asrPort = isGLM ? '8890' : '8889';
-                const asrHost = window.location.hostname + ':' + asrPort;
+                // Connect to unified ASR WebSocket endpoint
+                const asrHttpBase = asrBaseUrl || `http://${window.location.hostname}:8889`;
+                const wsProtocol = asrHttpBase.startsWith('https://') ? 'wss:' : 'ws:';
+                const asrHost = asrHttpBase.replace(/^https?:\/\//, '');
                 let wsUrl = `${wsProtocol}//${asrHost}/v1/audio/transcriptions/live?model=${encodeURIComponent(model)}&language=${encodeURIComponent(language)}`;
-                console.log(`[LIVE] Connecting to ${isGLM ? 'GLM-ASR' : 'Whisper'} server at ${asrHost}`);
+                console.log(`[LIVE] Connecting to unified ASR server at ${asrHost}`);
                 
                 console.log('[LIVE] Connecting to:', wsUrl);
                 document.getElementById('live-status-text').textContent = 'Connecting...';
@@ -4020,7 +4140,12 @@
                     break;
                     
                 case 'error':
-                    showToast(`Error: ${message.message}`, 'error');
+                    {
+                        const errText = message.message || message.error || JSON.stringify(message);
+                        statusText.textContent = `Error: ${errText}`;
+                        console.error('[LIVE] Server error payload:', message);
+                        showToast(`Error: ${errText}`, 'error');
+                    }
                     stopLiveTranscription();
                     break;
                     

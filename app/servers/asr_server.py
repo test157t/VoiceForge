@@ -3,6 +3,7 @@
 Unified ASR microservice supporting multiple backends:
 - Whisper (Faster Whisper / CTranslate2)
 - GLM-ASR (zai-org/GLM-ASR-Nano-2512)
+- Parakeet (NVIDIA Parakeet models via transformers)
 
 Runs in the 'asr' conda environment.
 The main VoiceForge server calls this via HTTP.
@@ -109,6 +110,10 @@ except Exception as e:
 from concurrent.futures import ThreadPoolExecutor
 ASR_WORKERS = int(os.getenv("ASR_WORKERS", "2"))
 _cuda_executor = ThreadPoolExecutor(max_workers=ASR_WORKERS, thread_name_prefix="cuda_worker")
+
+# Live call mode safety guard: force transcription if silence is never detected.
+LIVE_CALL_MAX_BUFFER_SECONDS = float(os.getenv("ASR_LIVE_CALL_MAX_BUFFER_SECONDS", "20"))
+LIVE_CALL_MIN_AUDIO_SECONDS = float(os.getenv("ASR_LIVE_CALL_MIN_AUDIO_SECONDS", "0.3"))
 
 
 # ==========================================
@@ -312,15 +317,36 @@ except ImportError as e:
     GLM_ASR_ERROR = str(e)
     log_warn(f"GLM-ASR (transformers) not installed: {e}")
 
+PARAKEET_AVAILABLE = False
+PARAKEET_ERROR = None
+try:
+    import nemo.collections.asr as nemo_asr
+    PARAKEET_AVAILABLE = True
+    log_info("Parakeet backend available")
+except Exception as e:
+    PARAKEET_ERROR = str(e)
+    log_warn(f"Parakeet backend not available (NeMo init failed): {e}")
+
 # GLM model management
 _glm_model = None
 _glm_processor = None
 _glm_model_name = None
 _glm_model_lock = threading.Lock()
 
+_parakeet_model = None
+_parakeet_model_name = None
+_parakeet_model_lock = threading.Lock()
+
 # Model configuration
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 DEFAULT_GLM_MODEL = "glm-asr-nano"
+
+PARAKEET_MODELS = {
+    "parakeet-tdt-0.6b-v2": "nvidia/parakeet-tdt-0.6b-v2",
+    "parakeet-tdt-0.6b-v3": "nvidia/parakeet-tdt-0.6b-v3",
+    "parakeet-rnnt-1.1b": "nvidia/parakeet-rnnt-1.1b",
+}
+DEFAULT_PARAKEET_MODEL = "parakeet-tdt-0.6b-v2"
 
 
 def load_glm_model(model_name: str = None):
@@ -444,17 +470,20 @@ def transcribe_with_glm(audio_path: str, model_name: str = None, language: str =
     inputs = inputs.to(model.device, dtype=model.dtype)
     
     # Generate transcription
-    outputs = model.generate(
-        **inputs,
-        do_sample=False,
-        max_new_tokens=500
-    )
-    
-    # Decode output
-    decoded = processor.batch_decode(
-        outputs[:, inputs.input_ids.shape[1]:],
-        skip_special_tokens=True
-    )
+    with torch.inference_mode():
+        outputs = model.generate(
+            **inputs,
+            do_sample=False,
+            max_new_tokens=500
+        )
+        
+        # Decode output
+        decoded = processor.batch_decode(
+            outputs[:, inputs.input_ids.shape[1]:],
+            skip_special_tokens=True
+        )
+    del outputs
+    del inputs
     
     full_text = decoded[0] if decoded else ""
     
@@ -478,6 +507,135 @@ def transcribe_with_glm(audio_path: str, model_name: str = None, language: str =
     }
 
 
+def load_parakeet_model(model_name: str = None):
+    """Load Parakeet ASR model via NeMo (thread-safe, lazy). CPU-focused backend."""
+    global _parakeet_model, _parakeet_model_name
+
+    if not PARAKEET_AVAILABLE:
+        raise RuntimeError(f"Parakeet backend not available: {PARAKEET_ERROR}")
+
+    if model_name is None:
+        model_name = DEFAULT_PARAKEET_MODEL
+
+    model_id = PARAKEET_MODELS.get(model_name, model_name)
+
+    with _parakeet_model_lock:
+        if _parakeet_model is not None and _parakeet_model_name != model_name:
+            log_info(f"Switching Parakeet model from {_parakeet_model_name} to {model_name}...")
+            del _parakeet_model
+            _parakeet_model = None
+            import gc
+            gc.collect()
+
+        if _parakeet_model is None:
+            log_info(f"Loading Parakeet model: {model_name} ({model_id}) on CPU")
+            t_start = time.perf_counter()
+
+            try:
+                _parakeet_model = nemo_asr.models.ASRModel.from_pretrained(
+                    model_name=model_id,
+                    map_location=torch.device("cpu"),
+                )
+                _parakeet_model = _parakeet_model.eval()
+            except Exception as e:
+                err_text = str(e)
+                if "Unrecognized model" in err_text or "model_type" in err_text:
+                    raise RuntimeError(
+                        "Parakeet models are NeMo checkpoints (.nemo), not transformers-native models. "
+                        "Install NeMo ASR in the ASR environment: pip install -U nemo_toolkit[asr]"
+                    )
+                raise
+
+            _parakeet_model_name = model_name
+            t_load = time.perf_counter() - t_start
+            log_info(f"Parakeet model loaded in {t_load:.1f}s on CPU")
+
+        return _parakeet_model
+
+
+def unload_parakeet_model():
+    """Unload Parakeet model and free memory."""
+    global _parakeet_model, _parakeet_model_name
+
+    with _parakeet_model_lock:
+        if _parakeet_model is not None:
+            del _parakeet_model
+            _parakeet_model = None
+            _parakeet_model_name = None
+
+            import gc
+            gc.collect()
+
+            log_info("Parakeet model unloaded")
+
+    return 0.0
+
+
+def transcribe_with_parakeet(audio_path: str, model_name: str = None, language: str = "en") -> dict:
+    """Transcribe audio using Parakeet on CPU."""
+    if not PARAKEET_AVAILABLE:
+        raise RuntimeError(f"Parakeet backend not available: {PARAKEET_ERROR}")
+
+    asr_model = load_parakeet_model(model_name)
+
+    audio_info = sf.info(audio_path)
+    total_duration = audio_info.duration
+
+    log_info(f"[PARAKEET] Transcribing: {audio_path} ({total_duration:.1f}s)")
+    t_start = time.perf_counter()
+
+    segments = []
+    full_text = ""
+
+    result = asr_model.transcribe([audio_path], timestamps=True)
+    first = result[0] if isinstance(result, list) and result else result
+
+    if isinstance(first, str):
+        full_text = first.strip()
+    elif isinstance(first, dict):
+        full_text = (first.get("text") or "").strip()
+        seg_ts = ((first.get("timestamp") or {}).get("segment") or []) if isinstance(first.get("timestamp"), dict) else []
+        for idx, seg in enumerate(seg_ts):
+            text = (seg.get("segment") or seg.get("text") or "").strip()
+            if not text:
+                continue
+            start = float(seg.get("start", 0.0) or 0.0)
+            end = float(seg.get("end", total_duration) or total_duration)
+            segments.append({"id": idx, "start": start, "end": end, "text": text})
+    else:
+        # NeMo Hypothesis-style object
+        full_text = str(getattr(first, "text", "") or "").strip()
+        ts = getattr(first, "timestamp", None)
+        if isinstance(ts, dict):
+            seg_ts = ts.get("segment") or []
+            for idx, seg in enumerate(seg_ts):
+                text = (seg.get("segment") or seg.get("text") or "").strip()
+                if not text:
+                    continue
+                start = float(seg.get("start", 0.0) or 0.0)
+                end = float(seg.get("end", total_duration) or total_duration)
+                segments.append({"id": idx, "start": start, "end": end, "text": text})
+
+    if not segments and full_text:
+        segments = [{
+            "id": 0,
+            "start": 0.0,
+            "end": total_duration,
+            "text": full_text,
+        }]
+
+    t_elapsed = time.perf_counter() - t_start
+    rtf = t_elapsed / total_duration if total_duration > 0 else 0
+    log_info(f"[PARAKEET] Done: {len(full_text)} chars, RTF={rtf:.2f}")
+
+    return {
+        "text": full_text,
+        "segments": segments,
+        "language": language,
+        "duration": total_duration,
+    }
+
+
 # ==========================================
 # UNIFIED TRANSCRIPTION ROUTER
 # ==========================================
@@ -487,6 +645,13 @@ def is_glm_model(model_name: str) -> bool:
     if not model_name:
         return False
     return model_name.lower().startswith("glm")
+
+
+def is_parakeet_model(model_name: str) -> bool:
+    """Check if model name refers to Parakeet backend."""
+    if not model_name:
+        return False
+    return model_name.lower().startswith("parakeet")
 
 
 def is_legacy_glm_gguf_model(model_name: str) -> bool:
@@ -503,6 +668,7 @@ def transcribe(audio_path: str, model_name: str = None, language: str = "en") ->
     
     Model name prefixes:
     - "glm-*" or "glm_*" -> GLM-ASR
+    - "parakeet-*" -> Parakeet
     - "whisper-*" or anything else -> Whisper
     """
     if model_name is None:
@@ -517,6 +683,11 @@ def transcribe(audio_path: str, model_name: str = None, language: str = "en") ->
         if not GLM_ASR_AVAILABLE:
             raise RuntimeError(f"GLM-ASR not available: {GLM_ASR_ERROR}")
         return transcribe_with_glm(audio_path, model_name, language)
+    elif is_parakeet_model(model_name):
+        # Use Parakeet
+        if not PARAKEET_AVAILABLE:
+            raise RuntimeError(f"Parakeet backend not available: {PARAKEET_ERROR}")
+        return transcribe_with_parakeet(audio_path, model_name, language)
     else:
         # Use Whisper
         if not FASTER_WHISPER_AVAILABLE:
@@ -598,7 +769,7 @@ def _postprocess_audio(audio_path: str, params: dict = None) -> str:
 
 app = FastAPI(
     title="VoiceForge ASR Server",
-    description="Unified speech-to-text transcription (Whisper + GLM-ASR)",
+    description="Unified speech-to-text transcription (Whisper + GLM-ASR + Parakeet)",
     version="3.0.0"
 )
 
@@ -623,6 +794,9 @@ class HealthResponse(BaseModel):
     glm_asr_available: bool
     glm_model_loaded: bool
     glm_model_name: Optional[str]
+    parakeet_available: bool
+    parakeet_model_loaded: bool
+    parakeet_model_name: Optional[str]
     cuda_available: bool
     gpu_name: Optional[str]
 
@@ -642,6 +816,9 @@ async def health_check():
         glm_asr_available=GLM_ASR_AVAILABLE,
         glm_model_loaded=_glm_model is not None,
         glm_model_name=_glm_model_name,
+        parakeet_available=PARAKEET_AVAILABLE,
+        parakeet_model_loaded=_parakeet_model is not None,
+        parakeet_model_name=_parakeet_model_name,
         cuda_available=torch.cuda.is_available(),
         gpu_name=gpu_name,
     )
@@ -660,6 +837,9 @@ async def warmup(model: str = None):
         if model and is_glm_model(model):
             load_glm_model()
             return {"status": "ok", "message": "GLM-ASR model loaded", "backend": "glm"}
+        elif model and is_parakeet_model(model):
+            load_parakeet_model(model)
+            return {"status": "ok", "message": "Parakeet model loaded", "backend": "parakeet"}
         else:
             load_whisper_model()
             return {"status": "ok", "message": "Whisper model loaded", "backend": "whisper"}
@@ -708,6 +888,10 @@ async def unload_model(backend: str = None):
         freed += unload_glm_model()
         messages.append("GLM-ASR unloaded")
 
+    if backend is None or backend == "parakeet":
+        freed += unload_parakeet_model()
+        messages.append("Parakeet unloaded")
+
     return {"success": True, "message": ", ".join(messages), "freed_gb": round(freed, 2)}
 
 
@@ -727,6 +911,12 @@ async def get_model_info():
             "model_name": _glm_model_name,
             "model_id": GLM_ASR_MODEL_ID,
             "available_models": ["glm-asr-nano"],
+        },
+        "parakeet": {
+            "available": PARAKEET_AVAILABLE,
+            "loaded": _parakeet_model is not None,
+            "model_name": _parakeet_model_name,
+            "available_models": list(PARAKEET_MODELS.keys()),
         },
     }
 
@@ -766,6 +956,7 @@ async def live_transcription_websocket(
     
     effective_model = model or f"whisper-{DEFAULT_WHISPER_MODEL}"
     use_glm = is_glm_model(effective_model)
+    use_parakeet = is_parakeet_model(effective_model)
     
     # Check backend availability
     if is_legacy_glm_gguf_model(effective_model):
@@ -779,10 +970,23 @@ async def live_transcription_websocket(
         await websocket.send_json({"type": "error", "message": f"GLM-ASR not available: {GLM_ASR_ERROR}"})
         await websocket.close()
         return
-    if not use_glm and not FASTER_WHISPER_AVAILABLE:
+    if use_parakeet and not PARAKEET_AVAILABLE:
+        await websocket.send_json({"type": "error", "message": f"Parakeet not available: {PARAKEET_ERROR}"})
+        await websocket.close()
+        return
+    if not use_glm and not use_parakeet and not FASTER_WHISPER_AVAILABLE:
         await websocket.send_json({"type": "error", "message": f"Whisper not available: {FASTER_WHISPER_ERROR}"})
         await websocket.close()
         return
+
+    # Fail fast on model load errors so user gets clear message before streaming.
+    if use_parakeet:
+        try:
+            load_parakeet_model(effective_model)
+        except Exception as e:
+            await websocket.send_json({"type": "error", "message": f"Parakeet model load failed: {e}"})
+            await websocket.close()
+            return
     
     await websocket.send_json({"type": "ready", "call_mode": call_mode})
     
@@ -840,14 +1044,22 @@ async def live_transcription_websocket(
                         # Calculate silence threshold in samples based on current sample rate
                         silence_samples = int(silence_threshold * sample_rate)
                         
-                        # If we've detected speech followed by silence, transcribe
-                        if has_speech and consecutive_silence_samples >= silence_samples:
+                        # Trigger transcription on silence OR if buffer grows too large.
+                        buffer_duration = accumulated_samples / sample_rate
+                        silence_triggered = has_speech and consecutive_silence_samples >= silence_samples
+                        max_buffer_triggered = buffer_duration >= LIVE_CALL_MAX_BUFFER_SECONDS
+
+                        if silence_triggered or max_buffer_triggered:
                             if audio_chunks:
                                 audio_data = np.concatenate(audio_chunks)
                                 
                                 # Only transcribe if we have enough audio
-                                if len(audio_data) > sample_rate * 0.3:  # At least 0.3 seconds
-                                    log_info(f"[LIVE-CALL] Processing {len(audio_data)/sample_rate:.1f}s of audio...")
+                                min_samples = int(max(LIVE_CALL_MIN_AUDIO_SECONDS, 0.1) * sample_rate)
+                                if len(audio_data) > min_samples:
+                                    trigger_reason = "silence" if silence_triggered else "max_buffer"
+                                    log_info(
+                                        f"[LIVE-CALL] Processing {len(audio_data)/sample_rate:.1f}s of audio ({trigger_reason})..."
+                                    )
                                     text = await _transcribe_audio_chunk(
                                         audio_data, sample_rate, effective_model, language
                                     )
@@ -889,8 +1101,8 @@ async def live_transcription_websocket(
                                 })
                 
                 except Exception as e:
-                    log_error(f"[LIVE] Audio decode error: {e}")
-                    await websocket.send_json({"type": "error", "message": f"Audio decode error: {e}"})
+                    log_error(f"[LIVE] Audio/process error: {e}")
+                    await websocket.send_json({"type": "error", "message": f"Audio/process error: {e}"})
         
         # Process any remaining audio
         if audio_chunks:
@@ -980,6 +1192,7 @@ def transcribe_streaming(
     # Determine backend
     use_legacy_glm_gguf = is_legacy_glm_gguf_model(model_name) if model_name else False
     use_glm = is_glm_model(model_name) if model_name else False
+    use_parakeet = is_parakeet_model(model_name) if model_name else False
     if use_legacy_glm_gguf:
         raise RuntimeError("GLM-ASR GGUF backend has been removed. Use model='glm-asr-nano' instead.")
     
@@ -991,6 +1204,8 @@ def transcribe_streaming(
     total_duration = len(audio_data) / sr
     if use_glm:
         backend_name = "GLM-ASR"
+    elif use_parakeet:
+        backend_name = "PARAKEET"
     else:
         backend_name = "WHISPER"
     log_info(f"[{backend_name}-STREAM] Transcribing: {audio_path} ({total_duration:.1f}s)")
@@ -1032,9 +1247,12 @@ def transcribe_streaming(
                 inputs = processor.apply_transcription_request(chunk)
                 inputs = inputs.to(model.device, dtype=model.dtype)
                 
-                outputs = model.generate(**inputs, do_sample=False, max_new_tokens=500)
-                decoded = processor.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)
+                with torch.inference_mode():
+                    outputs = model.generate(**inputs, do_sample=False, max_new_tokens=500)
+                    decoded = processor.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)
                 chunk_text = decoded[0].strip() if decoded else ""
+                del outputs
+                del inputs
                 
                 if chunk_text:
                     all_text_parts.append(chunk_text)
@@ -1055,6 +1273,22 @@ def transcribe_streaming(
             
             pos += chunk_samples - overlap_samples
             chunk_idx += 1
+    elif use_parakeet:
+        # Parakeet streaming (CPU): transcribe full audio and emit one chunk.
+        parakeet_result = transcribe_with_parakeet(audio_path, model_name, language)
+        chunk_text = parakeet_result.get("text", "").strip()
+        if chunk_text:
+            all_text_parts.append(chunk_text)
+            seg_data = {
+                "id": 0,
+                "start": 0.0,
+                "end": total_duration,
+                "text": chunk_text,
+            }
+            send_update("segment", {"segment": seg_data, "duration_processed": total_duration, "total_duration": total_duration})
+            send_update("text", {"text": chunk_text, "chunk_text": chunk_text, "chunk_idx": 0, "duration_processed": total_duration})
+        send_update("progress", {"progress": 90, "duration_processed": total_duration})
+        chunk_idx = 1
     else:
         # Whisper streaming
         whisper_model = model_name.replace("whisper-", "") if model_name and model_name.startswith("whisper-") else (model_name or DEFAULT_WHISPER_MODEL)
@@ -1140,6 +1374,9 @@ async def transcribe_stream_endpoint(
     elif is_glm_model(effective_model):
         if not GLM_ASR_AVAILABLE:
             raise HTTPException(status_code=503, detail=f"GLM-ASR not available: {GLM_ASR_ERROR}")
+    elif is_parakeet_model(effective_model):
+        if not PARAKEET_AVAILABLE:
+            raise HTTPException(status_code=503, detail=f"Parakeet not available: {PARAKEET_ERROR}")
     else:
         if not FASTER_WHISPER_AVAILABLE:
             raise HTTPException(status_code=503, detail=f"Whisper not available: {FASTER_WHISPER_ERROR}")
@@ -1276,6 +1513,8 @@ async def transcribe_endpoint(
     
     Supported models:
     - "glm-asr-nano": GLM-ASR-Nano-2512 via transformers (~3GB)
+    - "parakeet-tdt-0.6b-v2": NVIDIA Parakeet via NeMo (CPU)
+    - "parakeet-tdt-0.6b-v3": NVIDIA Parakeet via NeMo (CPU)
     - "whisper-large-v3-turbo": Whisper large-v3-turbo (default)
     - "whisper-large-v3", "whisper-medium", "whisper-small", etc.
     """
@@ -1291,6 +1530,9 @@ async def transcribe_endpoint(
     elif is_glm_model(effective_model):
         if not GLM_ASR_AVAILABLE:
             raise HTTPException(status_code=503, detail=f"GLM-ASR not available: {GLM_ASR_ERROR}")
+    elif is_parakeet_model(effective_model):
+        if not PARAKEET_AVAILABLE:
+            raise HTTPException(status_code=503, detail=f"Parakeet not available: {PARAKEET_ERROR}")
     else:
         if not FASTER_WHISPER_AVAILABLE:
             raise HTTPException(status_code=503, detail=f"Whisper not available: {FASTER_WHISPER_ERROR}")
@@ -1429,6 +1671,8 @@ if __name__ == "__main__":
                 log_warn("GLM-ASR GGUF backend has been removed. Warmup skipped for requested model.")
             elif args.warmup_model and is_glm_model(args.warmup_model):
                 load_glm_model()
+            elif args.warmup_model and is_parakeet_model(args.warmup_model):
+                load_parakeet_model(args.warmup_model)
             else:
                 load_whisper_model()
             log_info("Model warmed up successfully")
@@ -1438,6 +1682,7 @@ if __name__ == "__main__":
     log_info(f"Starting server on {args.host}:{args.port}")
     log_info(f"Whisper available: {FASTER_WHISPER_AVAILABLE}")
     log_info(f"GLM-ASR available: {GLM_ASR_AVAILABLE}")
+    log_info(f"Parakeet available: {PARAKEET_AVAILABLE}")
     
     uvicorn.run(
         app,

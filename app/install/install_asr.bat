@@ -4,7 +4,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 :: ===============================
 :: Unified ASR Environment Installer
-:: Supports: Whisper + GLM-ASR
+:: Supports: Whisper + GLM-ASR + Parakeet
 :: ===============================
 
 set "ASR_ENV_NAME=asr"
@@ -17,6 +17,7 @@ echo =============================================
 echo   Backends:
 echo   - Whisper (Faster Whisper / CTranslate2)
 echo   - GLM-ASR (zai-org/GLM-ASR-Nano-2512)
+echo   - Parakeet (NVIDIA Parakeet models)
 echo =============================================
 echo.
 
@@ -87,7 +88,7 @@ if errorlevel 1 (
 echo [INFO] Installing requirements from %REQ_FILE%...
 python -m pip install -r "%REQ_FILE%"
 
-:: Install transformers from source (required for GLM-ASR-Nano-2512)
+:: Install transformers from source (required for GLM-ASR)
 echo [INFO] Installing transformers from source (required for GLM-ASR)...
 python -m pip install git+https://github.com/huggingface/transformers
 
@@ -114,6 +115,13 @@ if errorlevel 1 (
     echo [WARN] Transformers may not be properly installed. GLM-ASR requires transformers from source.
 )
 
+:: Verify NeMo installation
+echo [INFO] Verifying NeMo installation (for Parakeet)...
+python -c "import nemo.collections.asr as nemo_asr; print('NeMo ASR OK')" 2>nul
+if errorlevel 1 (
+    echo [WARN] NeMo ASR may not be properly installed. Parakeet models require nemo_toolkit[asr].
+)
+
 echo.
 echo [INFO] ASR environment setup complete!
 echo [INFO] Environment name: %ASR_ENV_NAME%
@@ -121,6 +129,7 @@ echo.
 echo [NOTE] Models will be downloaded on first use:
 echo        - Whisper models cached in: app\models\whisper
 echo        - GLM-ASR model (~3GB) cached in: app\models\glm_asr
+echo        - Parakeet models cached by HuggingFace in your local cache
 exit /b 0
 
 :: ===============================

@@ -43,8 +43,8 @@ async def asr_health_check(backend: str = None):
     """Check ASR server health.
     
     Args:
-        backend: Optional backend to check ("whisper" or "glm"). 
-                 If not specified, checks both and returns combined status.
+        backend: Optional backend to check ("whisper", "glm", or "parakeet").
+                 If not specified, checks all backends and returns combined status.
     """
     result = {
         "status": "healthy",
@@ -74,17 +74,58 @@ async def asr_health_check(backend: str = None):
                 result["backends"]["glm"] = {"status": "error", "detail": resp.text}
         except Exception as e:
             result["backends"]["glm"] = {"status": "unavailable", "detail": str(e)}
+
+    # Check Parakeet (served by the unified ASR server)
+    if backend is None or backend == "parakeet":
+        try:
+            resp = get_shared_session().get(f"{WHISPERASR_SERVER_URL}/health", timeout=5)
+            if resp.status_code == 200:
+                health = resp.json()
+                result["backends"]["parakeet"] = {
+                    "status": "healthy" if health.get("parakeet_available", False) else "unavailable",
+                    "parakeet_available": health.get("parakeet_available", False),
+                    "parakeet_model_loaded": health.get("parakeet_model_loaded", False),
+                    "parakeet_model_name": health.get("parakeet_model_name"),
+                    "url": WHISPERASR_SERVER_URL,
+                }
+            else:
+                result["backends"]["parakeet"] = {"status": "error", "detail": resp.text}
+        except Exception as e:
+            result["backends"]["parakeet"] = {"status": "unavailable", "detail": str(e)}
     
     # Set overall status
-    whisper_ok = result["backends"].get("whisper", {}).get("status") == "healthy"
-    glm_ok = result["backends"].get("glm", {}).get("status") == "healthy"
-    
-    if not whisper_ok and not glm_ok:
-        result["status"] = "unhealthy"
-    elif not whisper_ok or not glm_ok:
-        result["status"] = "partial"
+    if backend == "whisper":
+        result["status"] = "healthy" if result["backends"].get("whisper", {}).get("status") == "healthy" else "unhealthy"
+    elif backend == "glm":
+        result["status"] = "healthy" if result["backends"].get("glm", {}).get("status") == "healthy" else "unhealthy"
+    elif backend == "parakeet":
+        result["status"] = "healthy" if result["backends"].get("parakeet", {}).get("status") == "healthy" else "unhealthy"
+    else:
+        whisper_ok = result["backends"].get("whisper", {}).get("status") == "healthy"
+        glm_ok = result["backends"].get("glm", {}).get("status") == "healthy"
+        parakeet_ok = result["backends"].get("parakeet", {}).get("status") == "healthy"
+
+        ok_count = sum([1 if whisper_ok else 0, 1 if glm_ok else 0, 1 if parakeet_ok else 0])
+        if ok_count == 0:
+            result["status"] = "unhealthy"
+        elif ok_count < 3:
+            result["status"] = "partial"
     
     return result
+
+
+@router.get("/v1/asr/model_info")
+async def asr_model_info():
+    """Proxy ASR model_info from unified ASR server."""
+    try:
+        resp = get_shared_session().get(f"{WHISPERASR_SERVER_URL}/model_info", timeout=8)
+        if resp.status_code == 200:
+            return resp.json()
+        raise HTTPException(status_code=502, detail=f"ASR model_info error: {resp.status_code} - {resp.text}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"ASR model_info unavailable: {str(e)}")
 
 
 @router.post("/api/transcribe")
