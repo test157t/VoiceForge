@@ -27,9 +27,9 @@ class TTSRequest(BaseModel):
         default="chunked",
         description="Generation mode: 'chunked' (wait for complete) or 'streaming' (progressive)"
     )
-    tts_backend: Literal["chatterbox", "pocket_tts", "kokoro"] = Field(
+    tts_backend: Literal["chatterbox", "pocket_tts", "kokoro", "omnivoice"] = Field(
         default="chatterbox",
-        description="TTS backend: chatterbox, pocket_tts, or kokoro"
+        description="TTS backend: chatterbox, pocket_tts, kokoro, or omnivoice"
     )
     tts_batch_tokens: int = Field(default=100, description="Max tokens per TTS batch")
     tts_token_method: str = Field(default="tiktoken", description="Token counting method")
@@ -46,6 +46,20 @@ class TTSRequest(BaseModel):
     kokoro_voice: str = Field(
         default="af_sarah",
         description="Voice preset for Kokoro TTS v1.0 (e.g., af_sarah, am_michael, bf_emma, bm_george)"
+    )
+
+    # OmniVoice settings
+    omnivoice_voice: str = Field(
+        default="auto",
+        description="OmniVoice voice mode: auto, instruct:<attributes>, or path to reference audio"
+    )
+    omnivoice_ref_text: Optional[str] = Field(
+        default=None,
+        description="Optional transcript for OmniVoice reference audio"
+    )
+    omnivoice_ref_asr_model: Optional[str] = Field(
+        default=None,
+        description="ASR model to use when transcribing OmniVoice reference audio (e.g. glm-asr-nano, parakeet-tdt-0.6b-v3)"
     )
 
     # Output format

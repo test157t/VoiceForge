@@ -19,6 +19,23 @@ from util.temp_file_utils import TempFileManager, ensure_wav_format
 from util.executor_utils import get_shared_executor
 
 
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
+async def _write_upload_to_path(upload_file: UploadFile, dest_path: str, chunk_size: int = UPLOAD_CHUNK_SIZE) -> int:
+    """Write uploaded content to disk in chunks to avoid large memory spikes."""
+    total_bytes = 0
+    await upload_file.seek(0)
+    with open(dest_path, "wb") as f:
+        while True:
+            chunk = await upload_file.read(chunk_size)
+            if not chunk:
+                break
+            f.write(chunk)
+            total_bytes += len(chunk)
+    return total_bytes
+
+
 async def process_audio_upload(
     upload_file: UploadFile,
     processor: Callable[[str, Dict[str, Any]], str],
@@ -54,9 +71,7 @@ async def process_audio_upload(
         file_ext = os.path.splitext(upload_file.filename)[1] if upload_file.filename else ".tmp"
         input_path = manager.create_temp_file(suffix=file_ext)
         
-        content = await upload_file.read()
-        with open(input_path, "wb") as f:
-            f.write(content)
+        await _write_upload_to_path(upload_file, input_path)
         
         # Convert to WAV if needed
         if convert_to_wav:
@@ -125,9 +140,7 @@ async def process_audio_upload_async(
         file_ext = os.path.splitext(upload_file.filename)[1] if upload_file.filename else ".tmp"
         input_path = manager.create_temp_file(suffix=file_ext)
         
-        content = await upload_file.read()
-        with open(input_path, "wb") as f:
-            f.write(content)
+        await _write_upload_to_path(upload_file, input_path)
         
         # Convert to WAV if needed
         if convert_to_wav:

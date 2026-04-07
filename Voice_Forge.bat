@@ -13,6 +13,7 @@ set "CHATTERBOX_ENV_NAME=chatterbox"
 set "CHATTERBOX_TRAIN_ENV_NAME=chatterbox_train"
 set "POCKET_TTS_ENV_NAME=pocket_tts"
 set "KOKORO_TTS_ENV_NAME=kokoro_tts"
+set "OMNIVOICE_TTS_ENV_NAME=omnivoice_tts"
 set "CONFIG_FILE=%~dp0voiceforge_config.bat"
 set "ENV_CONFIG_FILE=%~dp0voiceforge_env_config.bat"
 
@@ -23,6 +24,7 @@ set "LAUNCH_RVC=1"
 set "LAUNCH_CHATTERBOX=1"
 set "LAUNCH_POCKET_TTS=1"
 set "LAUNCH_KOKORO_TTS=1"
+set "LAUNCH_OMNIVOICE_TTS=1"
 set "LAUNCH_TRAINING=1"
 
 :: Environment Install Defaults (1=install, 0=skip)
@@ -33,6 +35,7 @@ set "INSTALL_RVC=1"
 set "INSTALL_CHATTERBOX=1"
 set "INSTALL_POCKET_TTS=1"
 set "INSTALL_KOKORO_TTS=1"
+set "INSTALL_OMNIVOICE_TTS=1"
 set "INSTALL_TRAINING=0"
 
 :: Load saved preferences if config files exist
@@ -51,6 +54,7 @@ set "AUDIO_SERVICES_SERVER_PORT=8892"
 set "CHATTERBOX_SERVER_PORT=8893"
 set "POCKET_TTS_SERVER_PORT=8894"
 set "KOKORO_TTS_SERVER_PORT=8896"
+set "OMNIVOICE_TTS_SERVER_PORT=8898"
 set "TRAINING_SERVER_PORT=8895"
 
 :: Find conda
@@ -104,23 +108,25 @@ echo [3] Toggle RVC Server         - Voice conversion
 echo [4] Toggle Chatterbox         - TTS
 echo [5] Toggle Pocket TTS         - Lightweight TTS
 echo [6] Toggle Kokoro TTS         - ONNX TTS
-echo [7] Toggle Training Environment - Model training
+echo [7] Toggle OmniVoice TTS      - Multilingual TTS
+echo [8] Toggle Training Environment - Model training
 echo.
-echo [8] Save Configuration
-echo [9] Enable All
-echo [0] Disable All
+echo [9] Save Configuration
+echo [0] Enable All
+echo [D] Disable All
 echo [R] Reset to Defaults
 echo [B] Back to Setup Menu
 echo =============================================
 echo.
 
-choice /C 1234567890RB /N /M "Choose option: "
-if errorlevel 12 goto UTILITIES_MENU
-if errorlevel 11 goto RESET_SERVER_DEFAULTS
-if errorlevel 10 goto DISABLE_ALL_SERVERS
-if errorlevel 9 goto ENABLE_ALL_SERVERS
-if errorlevel 8 goto SAVE_SERVER_CONFIG
-if errorlevel 7 call :TOGGLE_ENV LAUNCH_TRAINING
+choice /C 1234567890DRB /N /M "Choose option: "
+if errorlevel 13 goto UTILITIES_MENU
+if errorlevel 12 goto RESET_SERVER_DEFAULTS
+if errorlevel 11 goto DISABLE_ALL_SERVERS
+if errorlevel 10 goto ENABLE_ALL_SERVERS
+if errorlevel 9 goto SAVE_SERVER_CONFIG
+if errorlevel 8 call :TOGGLE_ENV LAUNCH_TRAINING
+if errorlevel 7 call :TOGGLE_ENV LAUNCH_OMNIVOICE_TTS
 if errorlevel 6 call :TOGGLE_ENV LAUNCH_KOKORO_TTS
 if errorlevel 5 call :TOGGLE_ENV LAUNCH_POCKET_TTS
 if errorlevel 4 call :TOGGLE_ENV LAUNCH_CHATTERBOX
@@ -148,6 +154,7 @@ if "%INSTALL_RVC%"=="1" (echo   [X] RVC Environment    - Voice conversion) else 
 if "%INSTALL_CHATTERBOX%"=="1" (echo   [X] Chatterbox         - TTS) else (echo   [ ] Chatterbox         - TTS)
 if "%INSTALL_POCKET_TTS%"=="1" (echo   [X] Pocket TTS         - Lightweight TTS) else (echo   [ ] Pocket TTS         - Lightweight TTS)
 if "%INSTALL_KOKORO_TTS%"=="1" (echo   [X] Kokoro TTS         - ONNX TTS) else (echo   [ ] Kokoro TTS         - ONNX TTS)
+if "%INSTALL_OMNIVOICE_TTS%"=="1" (echo   [X] OmniVoice TTS      - Multilingual TTS) else (echo   [ ] OmniVoice TTS      - Multilingual TTS)
 if "%INSTALL_TRAINING%"=="1" (echo   [X] Training            - Model training) else (echo   [ ] Training            - Model training)
 echo.
 echo [1] Toggle Main Environment   - Required
@@ -157,21 +164,23 @@ echo [4] Toggle RVC Environment    - Voice conversion
 echo [5] Toggle Chatterbox         - TTS
 echo [6] Toggle Pocket TTS         - Lightweight TTS
 echo [7] Toggle Kokoro TTS         - ONNX TTS
-echo [8] Toggle Training           - Model training
+echo [8] Toggle OmniVoice TTS      - Multilingual TTS
+echo [9] Toggle Training           - Model training
 echo.
-echo [9] Save Configuration
+echo [A] Save Configuration
 echo [0] Enable All
 echo [R] Reset to Defaults
 echo [B] Back to Setup Menu
 echo =============================================
 echo.
 
-choice /C 1234567890RB /N /M "Choose option: "
-if errorlevel 12 goto UTILITIES_MENU
-if errorlevel 11 goto RESET_ENV_DEFAULTS
-if errorlevel 10 goto ENABLE_ALL_ENVS
-if errorlevel 9 goto SAVE_ENV_CONFIG
-if errorlevel 8 call :TOGGLE_ENV INSTALL_TRAINING
+choice /C 123456789A0RB /N /M "Choose option: "
+if errorlevel 13 goto UTILITIES_MENU
+if errorlevel 12 goto RESET_ENV_DEFAULTS
+if errorlevel 11 goto ENABLE_ALL_ENVS
+if errorlevel 10 goto SAVE_ENV_CONFIG
+if errorlevel 9 call :TOGGLE_ENV INSTALL_TRAINING
+if errorlevel 8 call :TOGGLE_ENV INSTALL_OMNIVOICE_TTS
 if errorlevel 7 call :TOGGLE_ENV INSTALL_KOKORO_TTS
 if errorlevel 6 call :TOGGLE_ENV INSTALL_POCKET_TTS
 if errorlevel 5 call :TOGGLE_ENV INSTALL_CHATTERBOX
@@ -195,6 +204,7 @@ echo set "LAUNCH_RVC=%LAUNCH_RVC%"
 echo set "LAUNCH_CHATTERBOX=%LAUNCH_CHATTERBOX%"
 echo set "LAUNCH_POCKET_TTS=%LAUNCH_POCKET_TTS%"
 echo set "LAUNCH_KOKORO_TTS=%LAUNCH_KOKORO_TTS%"
+echo set "LAUNCH_OMNIVOICE_TTS=%LAUNCH_OMNIVOICE_TTS%"
 echo set "LAUNCH_TRAINING=%LAUNCH_TRAINING%"
 ) > "%CONFIG_FILE%"
 echo [INFO] Server launch configuration saved successfully!
@@ -209,6 +219,7 @@ set "LAUNCH_RVC=1"
 set "LAUNCH_CHATTERBOX=1"
 set "LAUNCH_POCKET_TTS=1"
 set "LAUNCH_KOKORO_TTS=1"
+set "LAUNCH_OMNIVOICE_TTS=1"
 set "LAUNCH_TRAINING=1"
 goto CONFIGURE_SERVERS
 
@@ -219,6 +230,7 @@ set "LAUNCH_RVC=0"
 set "LAUNCH_CHATTERBOX=0"
 set "LAUNCH_POCKET_TTS=0"
 set "LAUNCH_KOKORO_TTS=0"
+set "LAUNCH_OMNIVOICE_TTS=0"
 set "LAUNCH_TRAINING=0"
 goto CONFIGURE_SERVERS
 
@@ -229,6 +241,7 @@ set "LAUNCH_RVC=1"
 set "LAUNCH_CHATTERBOX=1"
 set "LAUNCH_POCKET_TTS=1"
 set "LAUNCH_KOKORO_TTS=1"
+set "LAUNCH_OMNIVOICE_TTS=1"
 set "LAUNCH_TRAINING=1"
 if exist "%CONFIG_FILE%" del "%CONFIG_FILE%"
 echo [INFO] Reset server launch defaults and removed saved config.
@@ -243,8 +256,9 @@ if "%LAUNCH_RVC%"=="1" set /a SERVER_COUNT+=1
 if "%LAUNCH_CHATTERBOX%"=="1" set /a SERVER_COUNT+=1
 if "%LAUNCH_POCKET_TTS%"=="1" set /a SERVER_COUNT+=1
 if "%LAUNCH_KOKORO_TTS%"=="1" set /a SERVER_COUNT+=1
+if "%LAUNCH_OMNIVOICE_TTS%"=="1" set /a SERVER_COUNT+=1
 if "%LAUNCH_TRAINING%"=="1" set /a SERVER_COUNT+=1
-echo Servers enabled: %SERVER_COUNT% of 7
+echo Servers enabled: %SERVER_COUNT% of 8
 call :SHOW_ENV_STATUS
 exit /b 0
 
@@ -256,6 +270,7 @@ if "%LAUNCH_RVC%"=="1" (echo   [X] RVC Server         - Voice conversion) else (
 if "%LAUNCH_CHATTERBOX%"=="1" (echo   [X] Chatterbox         - TTS) else (echo   [ ] Chatterbox         - TTS)
 if "%LAUNCH_POCKET_TTS%"=="1" (echo   [X] Pocket TTS         - Lightweight TTS) else (echo   [ ] Pocket TTS         - Lightweight TTS)
 if "%LAUNCH_KOKORO_TTS%"=="1" (echo   [X] Kokoro TTS         - ONNX TTS) else (echo   [ ] Kokoro TTS         - ONNX TTS)
+if "%LAUNCH_OMNIVOICE_TTS%"=="1" (echo   [X] OmniVoice TTS      - Multilingual TTS) else (echo   [ ] OmniVoice TTS      - Multilingual TTS)
 if "%LAUNCH_TRAINING%"=="1" (echo   [X] Training Server    - Model training) else (echo   [ ] Training Server    - Model training)
 exit /b 0
 
@@ -268,6 +283,7 @@ if "%INSTALL_RVC%"=="1" (echo   [X] RVC Environment    - Voice conversion) else 
 if "%INSTALL_CHATTERBOX%"=="1" (echo   [X] Chatterbox         - TTS) else (echo   [ ] Chatterbox         - TTS)
 if "%INSTALL_POCKET_TTS%"=="1" (echo   [X] Pocket TTS         - Lightweight TTS) else (echo   [ ] Pocket TTS         - Lightweight TTS)
 if "%INSTALL_KOKORO_TTS%"=="1" (echo   [X] Kokoro TTS         - ONNX TTS) else (echo   [ ] Kokoro TTS         - ONNX TTS)
+if "%INSTALL_OMNIVOICE_TTS%"=="1" (echo   [X] OmniVoice TTS      - Multilingual TTS) else (echo   [ ] OmniVoice TTS      - Multilingual TTS)
 if "%INSTALL_TRAINING%"=="1" (echo   [X] Training            - Model training) else (echo   [ ] Training            - Model training)
 exit /b 0
 
@@ -280,8 +296,9 @@ if "%INSTALL_RVC%"=="1" set /a ENV_COUNT+=1
 if "%INSTALL_CHATTERBOX%"=="1" set /a ENV_COUNT+=1
 if "%INSTALL_POCKET_TTS%"=="1" set /a ENV_COUNT+=1
 if "%INSTALL_KOKORO_TTS%"=="1" set /a ENV_COUNT+=1
+if "%INSTALL_OMNIVOICE_TTS%"=="1" set /a ENV_COUNT+=1
 if "%INSTALL_TRAINING%"=="1" set /a ENV_COUNT+=1
-echo Environments: %ENV_COUNT% of 8 selected
+echo Environments: %ENV_COUNT% of 9 selected
 echo (Press 2 to configure)
 exit /b 0
 
@@ -309,6 +326,7 @@ echo set "INSTALL_RVC=%INSTALL_RVC%"
 echo set "INSTALL_CHATTERBOX=%INSTALL_CHATTERBOX%"
 echo set "INSTALL_POCKET_TTS=%INSTALL_POCKET_TTS%"
 echo set "INSTALL_KOKORO_TTS=%INSTALL_KOKORO_TTS%"
+echo set "INSTALL_OMNIVOICE_TTS=%INSTALL_OMNIVOICE_TTS%"
 echo set "INSTALL_TRAINING=%INSTALL_TRAINING%"
 ) > "%ENV_CONFIG_FILE%"
 echo [INFO] Environment configuration saved successfully!
@@ -324,6 +342,7 @@ set "INSTALL_RVC=1"
 set "INSTALL_CHATTERBOX=1"
 set "INSTALL_POCKET_TTS=1"
 set "INSTALL_KOKORO_TTS=1"
+set "INSTALL_OMNIVOICE_TTS=1"
 set "INSTALL_TRAINING=1"
 goto CONFIGURE_ENVS
 
@@ -335,6 +354,7 @@ set "INSTALL_RVC=0"
 set "INSTALL_CHATTERBOX=0"
 set "INSTALL_POCKET_TTS=0"
 set "INSTALL_KOKORO_TTS=0"
+set "INSTALL_OMNIVOICE_TTS=0"
 set "INSTALL_TRAINING=0"
 goto CONFIGURE_ENVS
 
@@ -346,6 +366,7 @@ set "INSTALL_RVC=1"
 set "INSTALL_CHATTERBOX=1"
 set "INSTALL_POCKET_TTS=1"
 set "INSTALL_KOKORO_TTS=1"
+set "INSTALL_OMNIVOICE_TTS=1"
 set "INSTALL_TRAINING=0"
 if exist "%ENV_CONFIG_FILE%" del "%ENV_CONFIG_FILE%"
 echo [INFO] Reset to defaults and removed saved config.
@@ -418,6 +439,18 @@ if "%INSTALL_POCKET_TTS%"=="1" (
     echo [INFO] Installing/Updating Pocket TTS environment...
     call "%~dp0app\install\install_pocket_tts.bat"
     if errorlevel 1 echo [WARN] Pocket TTS environment setup had issues
+)
+
+if "%INSTALL_KOKORO_TTS%"=="1" (
+    echo [INFO] Installing/Updating Kokoro TTS environment...
+    call "%~dp0app\install\install_kokoro_tts.bat"
+    if errorlevel 1 echo [WARN] Kokoro TTS environment setup had issues
+)
+
+if "%INSTALL_OMNIVOICE_TTS%"=="1" (
+    echo [INFO] Installing/Updating OmniVoice TTS environment...
+    call "%~dp0app\install\install_omnivoice.bat"
+    if errorlevel 1 echo [WARN] OmniVoice TTS environment setup had issues
 )
 
 if "%INSTALL_TRAINING%"=="1" (
@@ -571,6 +604,19 @@ if "%LAUNCH_KOKORO_TTS%"=="1" (
     echo [SKIP] Kokoro TTS Server - disabled by user
 )
 
+if "%LAUNCH_OMNIVOICE_TTS%"=="1" (
+    if exist "%CONDA_BASE%\envs\%OMNIVOICE_TTS_ENV_NAME%\python.exe" if exist "%~dp0app\launch\launch_omnivoice_server.bat" (
+        start "VoiceForge OmniVoice TTS" cmd /k "%~dp0app\launch\launch_omnivoice_server.bat"
+        echo [INFO] OmniVoice TTS Server starting on port %OMNIVOICE_TTS_SERVER_PORT%...
+        set /a SERVICES_LAUNCHED+=1
+        timeout /t 1 /nobreak >nul
+    ) else (
+        echo [WARN] OmniVoice TTS Server not available - environment or launcher missing
+    )
+) else (
+    echo [SKIP] OmniVoice TTS Server - disabled by user
+)
+
 if "%LAUNCH_TRAINING%"=="1" (
     if exist "%CONDA_BASE%\envs\%CHATTERBOX_TRAIN_ENV_NAME%\python.exe" if exist "%~dp0app\launch\launch_training_server.bat" (
         start "VoiceForge Training" cmd /k "%~dp0app\launch\launch_training_server.bat"
@@ -654,6 +700,26 @@ if not errorlevel 1 (
     echo [SKIP] %POCKET_TTS_ENV_NAME% not installed
 )
 
+:: Update Kokoro TTS env if exists
+"%CONDA_EXE%" env list | findstr /C:"%KOKORO_TTS_ENV_NAME%" >nul 2>&1
+if not errorlevel 1 (
+    echo [INFO] Updating %KOKORO_TTS_ENV_NAME%...
+    call "%~dp0app\install\install_kokoro_tts.bat"
+    if errorlevel 1 echo [WARN] Kokoro TTS environment update had issues
+) else (
+    echo [SKIP] %KOKORO_TTS_ENV_NAME% not installed
+)
+
+:: Update OmniVoice TTS env if exists
+"%CONDA_EXE%" env list | findstr /C:"%OMNIVOICE_TTS_ENV_NAME%" >nul 2>&1
+if not errorlevel 1 (
+    echo [INFO] Updating %OMNIVOICE_TTS_ENV_NAME%...
+    call "%~dp0app\install\install_omnivoice.bat"
+    if errorlevel 1 echo [WARN] OmniVoice TTS environment update had issues
+) else (
+    echo [SKIP] %OMNIVOICE_TTS_ENV_NAME% not installed
+)
+
 echo.
 echo [INFO] Update complete!
 pause
@@ -665,7 +731,7 @@ goto UTILITIES_MENU
 :INSTALL_ALL_ENVS
 echo.
 echo [INFO] Installing all environments...
-echo [INFO] This will setup: %CONDA_ENV_NAME%, %ASR_ENV_NAME%, %RVC_ENV_NAME%, %AUDIO_SERVICES_ENV_NAME%, %CHATTERBOX_ENV_NAME%, %POCKET_TTS_ENV_NAME%
+echo [INFO] This will setup: %CONDA_ENV_NAME%, %ASR_ENV_NAME%, %RVC_ENV_NAME%, %AUDIO_SERVICES_ENV_NAME%, %CHATTERBOX_ENV_NAME%, %POCKET_TTS_ENV_NAME%, %KOKORO_TTS_ENV_NAME%, %OMNIVOICE_TTS_ENV_NAME%
 echo.
 pause
 
@@ -711,6 +777,18 @@ if errorlevel 1 (
     echo [WARN] Pocket TTS environment setup had issues (optional component).
 )
 
+:: Install Kokoro TTS env
+call "%~dp0app\install\install_kokoro_tts.bat"
+if errorlevel 1 (
+    echo [WARN] Kokoro TTS environment setup had issues (optional component).
+)
+
+:: Install OmniVoice TTS env
+call "%~dp0app\install\install_omnivoice.bat"
+if errorlevel 1 (
+    echo [WARN] OmniVoice TTS environment setup had issues (optional component).
+)
+
 echo.
 echo [INFO] All environments installed successfully!
 pause
@@ -732,6 +810,8 @@ echo     - %AUDIO_SERVICES_ENV_NAME%
 echo     - %RVC_ENV_NAME%
 echo     - %CHATTERBOX_ENV_NAME%
 echo     - %POCKET_TTS_ENV_NAME%
+echo     - %KOKORO_TTS_ENV_NAME%
+echo     - %OMNIVOICE_TTS_ENV_NAME%
 echo     - %CHATTERBOX_TRAIN_ENV_NAME% (if exists)
 echo.
 echo   Press Y to confirm, N to cancel.
@@ -785,6 +865,20 @@ if not errorlevel 1 (
     "%CONDA_EXE%" env remove -n "%POCKET_TTS_ENV_NAME%" -y
 )
 
+:: Delete Kokoro TTS env
+"%CONDA_EXE%" env list | findstr /C:"%KOKORO_TTS_ENV_NAME%" >nul 2>&1
+if not errorlevel 1 (
+    echo [INFO] Removing %KOKORO_TTS_ENV_NAME%...
+    "%CONDA_EXE%" env remove -n "%KOKORO_TTS_ENV_NAME%" -y
+)
+
+:: Delete OmniVoice TTS env
+"%CONDA_EXE%" env list | findstr /C:"%OMNIVOICE_TTS_ENV_NAME%" >nul 2>&1
+if not errorlevel 1 (
+    echo [INFO] Removing %OMNIVOICE_TTS_ENV_NAME%...
+    "%CONDA_EXE%" env remove -n "%OMNIVOICE_TTS_ENV_NAME%" -y
+)
+
 :: Delete Training envs (if they exist)
 "%CONDA_EXE%" env list | findstr /C:"%CHATTERBOX_TRAIN_ENV_NAME%" >nul 2>&1
 if not errorlevel 1 (
@@ -826,6 +920,7 @@ set "ASR_SERVER_URL=http://127.0.0.1:%ASR_SERVER_PORT%"
 set "RVC_SERVER_URL=http://127.0.0.1:%RVC_SERVER_PORT%"
 set "CHATTERBOX_SERVER_URL=http://127.0.0.1:%CHATTERBOX_SERVER_PORT%"
 set "POCKET_TTS_SERVER_URL=http://127.0.0.1:%POCKET_TTS_SERVER_PORT%"
+set "OMNIVOICE_TTS_SERVER_URL=http://127.0.0.1:%OMNIVOICE_TTS_SERVER_PORT%"
 set "TRAINING_SERVER_URL=http://127.0.0.1:%TRAINING_SERVER_PORT%"
 
 :: Launch ASR server in background (if env exists)
@@ -870,6 +965,7 @@ echo [INFO] ASR Server URL: %ASR_SERVER_URL% (Whisper + GLM-ASR)
 echo [INFO] RVC Server URL: %RVC_SERVER_URL%
 echo [INFO] Chatterbox Server URL: %CHATTERBOX_SERVER_URL%
 echo [INFO] Pocket TTS Server URL: %POCKET_TTS_SERVER_URL%
+echo [INFO] OmniVoice TTS Server URL: %OMNIVOICE_TTS_SERVER_URL%
 echo [INFO] Training Server URL: %TRAINING_SERVER_URL%
 echo [DEBUG] Python path: 
 where python
@@ -927,6 +1023,7 @@ set "ASR_SERVER_URL=http://127.0.0.1:%ASR_SERVER_PORT%"
 set "RVC_SERVER_URL=http://127.0.0.1:%RVC_SERVER_PORT%"
 set "CHATTERBOX_SERVER_URL=http://127.0.0.1:%CHATTERBOX_SERVER_PORT%"
 set "POCKET_TTS_SERVER_URL=http://127.0.0.1:%POCKET_TTS_SERVER_PORT%"
+set "OMNIVOICE_TTS_SERVER_URL=http://127.0.0.1:%OMNIVOICE_TTS_SERVER_PORT%"
 set "TRAINING_SERVER_URL=http://127.0.0.1:%TRAINING_SERVER_PORT%"
 
 :: Launch selected servers in background
@@ -937,6 +1034,7 @@ echo [INFO] ASR Server URL: %ASR_SERVER_URL% (Whisper + GLM-ASR)
 echo [INFO] RVC Server URL: %RVC_SERVER_URL%
 echo [INFO] Chatterbox Server URL: %CHATTERBOX_SERVER_URL%
 echo [INFO] Pocket TTS Server URL: %POCKET_TTS_SERVER_URL%
+echo [INFO] OmniVoice TTS Server URL: %OMNIVOICE_TTS_SERVER_URL%
 echo [INFO] Training Server URL: %TRAINING_SERVER_URL%
 python -X faulthandler -u "app\servers\main_server.py" --port 8888
 

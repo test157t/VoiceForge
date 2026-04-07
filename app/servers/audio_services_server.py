@@ -12,6 +12,7 @@ Runs in a single conda env: "audio_services".
 import os
 import sys
 import json
+import io
 import math
 import re
 import shutil
@@ -23,7 +24,7 @@ from typing import Optional, List, Dict, Any
 import soundfile as sf
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
@@ -1083,6 +1084,198 @@ def build_ffmpeg_base_cmd(
     return cmd
 
 
+def _run_ffmpeg_filter_bytes(
+    input_wav_bytes: bytes,
+    filters: Optional[str] = None,
+    output_channels: Optional[int] = None,
+) -> bytes:
+    """Run ffmpeg filter chain on WAV bytes and return WAV bytes."""
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-threads",
+        "0",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "wav",
+        "-i",
+        "pipe:0",
+    ]
+
+    if filters:
+        cmd.extend(["-af", filters])
+
+    cmd.extend(["-c:a", "pcm_f32le"])
+    if output_channels:
+        cmd.extend(["-ac", str(output_channels)])
+
+    cmd.extend(["-f", "wav", "pipe:1"])
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    out, err = proc.communicate(input=input_wav_bytes)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg bytes filter failed: {err.decode('utf-8', errors='ignore')}")
+    return out
+
+
+def post_process_voice_bytes(main_wav_bytes: bytes, post_params: Dict[str, Any]) -> bytes:
+    """In-memory variant of post_process_voice for streaming chunks."""
+    t_start = time.perf_counter()
+
+    # ===== Read and analyze input =====
+    with sf.SoundFile(io.BytesIO(main_wav_bytes)) as f:
+        input_channels = f.channels
+        sample_rate = f.samplerate
+
+    # Keep existing post FX assumptions (44100 processing path)
+    # If chunk is not 44.1k, resample once up front in-memory.
+    current_bytes = main_wav_bytes
+    if sample_rate != 44100:
+        data, _ = sf.read(io.BytesIO(main_wav_bytes), dtype='float32')
+        import soxr
+        data = soxr.resample(data, sample_rate, 44100, quality='VHQ')
+        buf = io.BytesIO()
+        sf.write(buf, data.astype(np.float32), 44100, format='WAV')
+        current_bytes = buf.getvalue()
+
+    # ===== Existing effect flag logic (mirrors file-based version) =====
+    highpass = float(post_params.get("highpass", 0) or 0)
+    lowpass = float(post_params.get("lowpass", 0) or 0)
+    bass_freq = float(post_params.get("bass_freq", 200) or 200)
+    bass_gain = float(post_params.get("bass_gain", 0) or 0)
+    treble_freq = float(post_params.get("treble_freq", 4000) or 4000)
+    treble_gain = float(post_params.get("treble_gain", 0) or 0)
+    reverb_delay = float(post_params.get("reverb_delay", 0) or 0)
+    reverb_decay = float(post_params.get("reverb_decay", 0) or 0)
+    crystalizer = float(post_params.get("crystalizer", 0) or 0)
+    deesser = float(post_params.get("deesser", 0) or 0)
+
+    audio_8d_enabled = bool(post_params.get("audio_8d_enabled", False))
+    asmr_enabled = bool(post_params.get("asmr_enabled", False))
+    asmr_tingles = float(post_params.get("asmr_tingles", 50) or 50)
+    asmr_breathiness = float(post_params.get("asmr_breathiness", 50) or 50)
+    asmr_crispness = float(post_params.get("asmr_crispness", 50) or 50)
+
+    pitch_shift_enabled = bool(post_params.get("pitch_shift_enabled", False))
+    pitch_shift_semitones = float(post_params.get("pitch_shift_semitones", 0) or 0)
+
+    _log_effect_interactions(post_params, asmr_enabled, audio_8d_enabled)
+
+    filters = []
+    needs_stereo = input_channels == 1 and (audio_8d_enabled or asmr_enabled)
+
+    if highpass > 0:
+        filters.append(f"highpass=f={highpass:.1f}")
+    if lowpass > 0:
+        filters.append(f"lowpass=f={lowpass:.1f}")
+    if abs(bass_gain) > 0.01:
+        filters.append(f"equalizer=f={bass_freq:.1f}:width_type=o:width=1:g={bass_gain:.2f}")
+    if abs(treble_gain) > 0.01:
+        filters.append(f"equalizer=f={treble_freq:.1f}:width_type=o:width=1:g={treble_gain:.2f}")
+
+    if asmr_enabled:
+        # Reuse same intent as existing path
+        if asmr_tingles > 0:
+            gain = (asmr_tingles / 100.0) * 6.0
+            filters.append(f"equalizer=f=8000:width_type=o:width=1:g={gain:.2f}")
+        if asmr_breathiness > 0:
+            gain = (asmr_breathiness / 100.0) * 4.0
+            filters.append(f"equalizer=f=12000:width_type=o:width=1:g={gain:.2f}")
+        if asmr_crispness > 0:
+            gain = (asmr_crispness / 100.0) * 4.0
+            filters.append(f"equalizer=f=5000:width_type=o:width=1:g={gain:.2f}")
+
+    if reverb_delay > 0 and reverb_decay > 0:
+        d = max(10.0, reverb_delay)
+        dec = max(0.1, min(0.99, reverb_decay / 100.0 if reverb_decay > 1 else reverb_decay))
+        filters.append(f"aecho=0.8:0.88:{d:.0f}:{dec:.3f}")
+
+    if crystalizer > 0:
+        amt = crystalizer / 100.0
+        filters.append(f"acompressor=threshold={-24 + 8*amt:.1f}dB:ratio={2 + 2*amt:.2f}:attack=5:release=50")
+    if deesser > 0:
+        amt = deesser / 100.0
+        filters.append(f"deesser=i={max(0.1, amt):.3f}")
+
+    use_python_spatial = False
+    spatial_params = {}
+    avg_distance = 0.5
+    if audio_8d_enabled:
+        mode = post_params.get("audio_8d_mode", "rotate")
+        speed = post_params.get("audio_8d_speed", 0.1)
+        pan_arc_degrees = post_params.get("audio_8d_depth", 180.0)
+        if pan_arc_degrees <= 2.0:
+            pan_arc_degrees = pan_arc_degrees * 180.0
+        half_arc = pan_arc_degrees / 2.0
+        avg_distance = post_params.get("audio_8d_distance", 0.3)
+        volume_db = 2.0 - 4.0 * avg_distance
+        if abs(volume_db) > 0.3:
+            filters.append(f"volume={volume_db:.1f}dB")
+
+        use_python_spatial = True
+        if mode == "center":
+            spatial_params = {"mode": "static", "start_angle": 0.0, "head_shadow": True, "head_shadow_intensity": 0.4}
+        elif mode == "static":
+            spatial_params = {"mode": "static", "start_angle": -90.0, "head_shadow": True, "head_shadow_intensity": 0.5}
+        elif mode == "static_right":
+            spatial_params = {"mode": "static", "start_angle": 90.0, "head_shadow": True, "head_shadow_intensity": 0.5}
+        else:
+            spatial_params = {
+                "mode": mode,
+                "speed_hz": speed,
+                "start_angle": -half_arc,
+                "end_angle": half_arc,
+                "head_shadow": True,
+                "head_shadow_intensity": 0.5 * (1.0 - avg_distance),
+            }
+
+    if asmr_enabled:
+        filters.append("alimiter=limit=0.95:attack=5:release=50")
+
+    filter_str = ",".join(filters) if filters else "anull"
+    current_bytes = _run_ffmpeg_filter_bytes(current_bytes, filters=filter_str, output_channels=(2 if needs_stereo else None))
+
+    if pitch_shift_enabled and abs(pitch_shift_semitones) > 0.001:
+        pitch_factor = 2 ** (pitch_shift_semitones / 12.0)
+        pitch_filter = f"asetrate=44100*{pitch_factor:.6f},aresample=44100,atempo=1"
+        current_bytes = _run_ffmpeg_filter_bytes(current_bytes, filters=pitch_filter, output_channels=None)
+
+    if use_python_spatial and spatial_params:
+        audio_data, sample_rate = sf.read(io.BytesIO(current_bytes))
+        stereo_output = process_spatial_audio_buffer(
+            audio_data,
+            sample_rate,
+            mode=spatial_params.get("mode", "sweep"),
+            speed_hz=spatial_params.get("speed_hz", 0.1),
+            start_angle=spatial_params.get("start_angle", -90.0),
+            end_angle=spatial_params.get("end_angle", 90.0),
+            head_shadow=spatial_params.get("head_shadow", True),
+            head_shadow_intensity=spatial_params.get("head_shadow_intensity", 0.4),
+            quality=post_params.get("audio_8d_quality", "balanced"),
+            distance=avg_distance,
+            itd_enabled=post_params.get("audio_8d_itd", None),
+            proximity_enabled=post_params.get("audio_8d_proximity", None),
+            crossfeed_enabled=post_params.get("audio_8d_crossfeed", None),
+            micro_movements=post_params.get("audio_8d_micro_movements", None),
+            speech_aware=post_params.get("audio_8d_speech_aware", True),
+            time_offset=post_params.get("spatial_time_offset", 0.0),
+        )
+        buf = io.BytesIO()
+        sf.write(buf, stereo_output, sample_rate, format='WAV')
+        current_bytes = buf.getvalue()
+
+    t_end = time.perf_counter()
+    log_info(f"[POST-BYTES] Total: {(t_end - t_start)*1000:.0f}ms")
+    return current_bytes
+
+
 def _log_effect_interactions(post_params: Dict[str, Any], asmr_enabled: bool, audio_8d_enabled: bool) -> None:
     """
     Log warnings about potentially problematic effect combinations.
@@ -1947,16 +2140,9 @@ async def api_process_chunk(
     import time
     t_start = time.perf_counter()
     
-    fd, tmp_input = tempfile.mkstemp(suffix=".wav")
-    os.close(fd)
-    temps_to_clean = [tmp_input]
-    
     try:
         content = await audio.read()
-        with open(tmp_input, "wb") as f:
-            f.write(content)
-        
-        current = tmp_input
+        current_bytes = content
         
         # Parse post-process params
         try:
@@ -1973,15 +2159,12 @@ async def api_process_chunk(
         )
         
         if do_postprocess:
-            post_output = post_process_voice(current, post_params)
-            if post_output and post_output != current:
-                temps_to_clean.append(post_output)
-                current = post_output
+            current_bytes = post_process_voice_bytes(current_bytes, post_params)
         
         # Step 2: Resample + volume (if needed) - inline for efficiency
         import soxr
         try:
-            data, current_sr = sf.read(current, dtype='float32')
+            data, current_sr = sf.read(io.BytesIO(current_bytes), dtype='float32')
             needs_sr = current_sr != target_sample_rate
             needs_vol = abs(output_volume - 1.0) >= 0.01
             
@@ -1992,28 +2175,23 @@ async def api_process_chunk(
                     data = data * output_volume
                     data = np.clip(data, -1.0, 1.0)
                 
-                fd, resample_output = tempfile.mkstemp(suffix="_resampled.wav")
-                os.close(fd)
-                sf.write(resample_output, data.astype(np.float32), target_sample_rate)
-                temps_to_clean.append(resample_output)
-                current = resample_output
+                out_buf = io.BytesIO()
+                sf.write(out_buf, data.astype(np.float32), target_sample_rate, format='WAV')
+                current_bytes = out_buf.getvalue()
+            elif not do_postprocess:
+                # Keep exact original bytes if absolutely no-op
+                current_bytes = content
         except Exception as resample_err:
             log_error(f"Resample step error: {resample_err}")
         
         t_elapsed = (time.perf_counter() - t_start) * 1000
         log_info(f"[ProcessChunk] Completed in {t_elapsed:.0f}ms")
-        
-        return FileResponse(
-            current,
-            media_type="audio/wav",
-            filename="processed_chunk.wav",
-            background=BackgroundTask(_cleanup_many, temps_to_clean),
-        )
+
+        return Response(content=current_bytes, media_type="audio/wav")
     except Exception as e:
         import traceback
         log_error(f"Process-chunk error: {type(e).__name__}: {e}")
         log_error(f"Traceback: {traceback.format_exc()}")
-        _cleanup_many(temps_to_clean)
         raise HTTPException(status_code=500, detail=str(e))
 
 

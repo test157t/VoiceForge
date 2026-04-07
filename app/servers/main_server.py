@@ -167,6 +167,7 @@ async def get_modules():
         "chatterbox": True,
         "pocket_tts": True,
         "kokoro": True,
+        "omnivoice": True,
         "asr": True,
     }
 
@@ -246,9 +247,20 @@ async def shutdown():
 if __name__ == "__main__":
     import argparse
     import uvicorn
+
+    def _env_flag(name: str, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8888")))
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
-    uvicorn.run("main_server:app", host=args.host, port=args.port, reload=args.reload)
+    uvicorn.run(
+        "main_server:app",
+        host=args.host,
+        port=args.port,
+        reload=args.reload,
+        access_log=_env_flag("VF_ACCESS_LOGS", "0"),
+    )

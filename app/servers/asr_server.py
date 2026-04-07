@@ -993,35 +993,71 @@ async def live_transcription_websocket(
     # Accumulate audio chunks
     audio_chunks = []
     sample_rate = 16000  # Default, updated from client
+    live_start = time.perf_counter()
+    audio_messages = 0
+    audio_samples_received = 0
+    transcripts_sent = 0
+    first_transcript_at = None
     
-    # Silence detection for call mode
-    energy_threshold = 0.001  # RMS threshold for silence
-    consecutive_silence_samples = 0
-    has_speech = False
+    # Client-side endpointing support
+    client_flushes = 0
     
     # Process audio in ~3 second intervals (for non-call mode)
     chunk_interval = 3.0  # seconds
     samples_per_chunk = int(chunk_interval * sample_rate)
     accumulated_samples = 0
     full_transcript = []
+
+    async def _flush_call_mode_buffer(trigger_reason: str):
+        nonlocal audio_chunks, accumulated_samples, transcripts_sent, first_transcript_at
+
+        if not audio_chunks:
+            return
+
+        audio_data = np.concatenate(audio_chunks)
+        min_samples = int(max(LIVE_CALL_MIN_AUDIO_SECONDS, 0.1) * sample_rate)
+        if len(audio_data) <= min_samples:
+            audio_chunks = []
+            accumulated_samples = 0
+            return
+
+        log_info(
+            f"[LIVE-CALL] Processing {len(audio_data)/sample_rate:.1f}s of audio ({trigger_reason})..."
+        )
+        text = await _transcribe_audio_chunk(audio_data, sample_rate, effective_model, language)
+        if text and text.strip():
+            log_info(f"[LIVE-CALL] Transcript: {text.strip()[:50]}...")
+            transcripts_sent += 1
+            if first_transcript_at is None:
+                first_transcript_at = time.perf_counter() - live_start
+            await websocket.send_json({
+                "type": "transcript",
+                "text": text.strip()
+            })
+
+        audio_chunks = []
+        accumulated_samples = 0
     
     try:
         while True:
-            try:
-                message = await asyncio.wait_for(websocket.receive_json(), timeout=60.0)
-            except asyncio.TimeoutError:
-                log_warn("[LIVE] WebSocket timeout, closing")
-                break
+            message = await websocket.receive_json()
             
             msg_type = message.get("type")
             
             if msg_type == "end":
                 log_info("[LIVE] Client sent end signal")
                 break
+
+            elif msg_type == "flush":
+                if call_mode:
+                    client_flushes += 1
+                    await _flush_call_mode_buffer("client_flush")
+                continue
             
             elif msg_type == "audio":
                 # Decode base64 Float32Array
                 try:
+                    audio_messages += 1
                     audio_b64 = message.get("data", "")
                     # Client always sends 16kHz audio
                     sample_rate = 16000
@@ -1030,51 +1066,16 @@ async def live_transcription_websocket(
                     audio_float32 = np.frombuffer(audio_bytes, dtype=np.float32)
                     audio_chunks.append(audio_float32)
                     accumulated_samples += len(audio_float32)
+                    audio_samples_received += len(audio_float32)
                     
                     if call_mode:
-                        # Call mode: detect silence to trigger transcription
-                        chunk_rms = np.sqrt(np.mean(audio_float32 ** 2))
-                        
-                        if chunk_rms < energy_threshold:
-                            consecutive_silence_samples += len(audio_float32)
-                        else:
-                            consecutive_silence_samples = 0
-                            has_speech = True
-                        
-                        # Calculate silence threshold in samples based on current sample rate
-                        silence_samples = int(silence_threshold * sample_rate)
-                        
-                        # Trigger transcription on silence OR if buffer grows too large.
+                        # Call mode: client handles endpointing and sends explicit flush.
+                        # Keep only max-buffer fallback for legacy clients.
                         buffer_duration = accumulated_samples / sample_rate
-                        silence_triggered = has_speech and consecutive_silence_samples >= silence_samples
                         max_buffer_triggered = buffer_duration >= LIVE_CALL_MAX_BUFFER_SECONDS
 
-                        if silence_triggered or max_buffer_triggered:
-                            if audio_chunks:
-                                audio_data = np.concatenate(audio_chunks)
-                                
-                                # Only transcribe if we have enough audio
-                                min_samples = int(max(LIVE_CALL_MIN_AUDIO_SECONDS, 0.1) * sample_rate)
-                                if len(audio_data) > min_samples:
-                                    trigger_reason = "silence" if silence_triggered else "max_buffer"
-                                    log_info(
-                                        f"[LIVE-CALL] Processing {len(audio_data)/sample_rate:.1f}s of audio ({trigger_reason})..."
-                                    )
-                                    text = await _transcribe_audio_chunk(
-                                        audio_data, sample_rate, effective_model, language
-                                    )
-                                    if text and text.strip():
-                                        log_info(f"[LIVE-CALL] Transcript: {text.strip()[:50]}...")
-                                        await websocket.send_json({
-                                            "type": "transcript",
-                                            "text": text.strip()
-                                        })
-                            
-                            # Reset for next utterance
-                            audio_chunks = []
-                            accumulated_samples = 0
-                            consecutive_silence_samples = 0
-                            has_speech = False
+                        if max_buffer_triggered:
+                            await _flush_call_mode_buffer("max_buffer")
                     
                     else:
                         # Standard mode: process in chunks with partial updates
@@ -1090,6 +1091,9 @@ async def live_transcription_websocket(
                             if chunk_text and chunk_text.strip():
                                 full_transcript.append(chunk_text.strip())
                                 current_text = " ".join(full_transcript)
+                                transcripts_sent += 1
+                                if first_transcript_at is None:
+                                    first_transcript_at = time.perf_counter() - live_start
                                 
                                 await websocket.send_json({
                                     "type": "partial",
@@ -1114,6 +1118,9 @@ async def live_transcription_websocket(
                 if chunk_text and chunk_text.strip():
                     if call_mode:
                         # In call mode, send as final transcript
+                        transcripts_sent += 1
+                        if first_transcript_at is None:
+                            first_transcript_at = time.perf_counter() - live_start
                         await websocket.send_json({
                             "type": "transcript",
                             "text": chunk_text.strip()
@@ -1141,6 +1148,14 @@ async def live_transcription_websocket(
         except:
             pass
     finally:
+        elapsed = time.perf_counter() - live_start
+        ttft = first_transcript_at if first_transcript_at is not None else elapsed
+        duration_seconds = audio_samples_received / sample_rate if sample_rate else 0.0
+        log_info(
+            f"[LIVE] METRICS call_mode={call_mode} messages={audio_messages} flushes={client_flushes} "
+            f"audio_seconds={duration_seconds:.2f} transcripts={transcripts_sent} "
+            f"ttft_ms={ttft*1000:.0f} total_ms={elapsed*1000:.0f}"
+        )
         try:
             await websocket.close()
         except:
@@ -1450,20 +1465,15 @@ async def transcribe_stream_endpoint(
             # Stream updates
             while True:
                 try:
-                    update = await asyncio.wait_for(
-                        loop.run_in_executor(None, lambda: update_queue.get(timeout=0.1)),
-                        timeout=120.0
-                    )
+                    update = await loop.run_in_executor(None, lambda: update_queue.get(timeout=0.1))
                     
                     yield f"data: {json.dumps(update)}\n\n"
                     
                     if update.get("type") in ("complete", "error"):
                         break
-                        
-                except asyncio.TimeoutError:
+                except queue.Empty:
                     if future.done():
                         break
-                except queue.Empty:
                     continue
             
             await future

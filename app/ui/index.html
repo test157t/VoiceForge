@@ -43,9 +43,9 @@
             <div class="card-section">
                 <!-- Voice Cloning (Chatterbox only) -->
                 <div class="form-group" id="chatterbox-voice-cloning-section">
-                    <label class="label-with-help">
+                    <label class="label-with-help" id="voice-cloning-label">
                         Voice Cloning Audio (Required for Chatterbox)
-                        <span class="help-icon" title="Reference audio file for voice cloning. 5+ seconds required, 10+ seconds recommended for best results. Only needed for Chatterbox backend.">?</span>
+                        <span class="help-icon" id="voice-cloning-help" title="Reference audio file for voice cloning. 5+ seconds required, 10+ seconds recommended for best results. Only needed for Chatterbox backend.">?</span>
                     </label>
                     <div class="form-row" style="gap: 8px; align-items: center;">
                         <select id="audio-prompt-select" style="flex: 1;" onchange="selectAudioPrompt(this)" aria-label="Select audio prompt">
@@ -54,7 +54,7 @@
                         <span style="color: var(--text-secondary);">or</span>
                         <input type="file" id="chatterbox-prompt-audio" accept="audio/*" style="flex: 1;" aria-label="Upload audio file" onchange="trackChatterboxPromptFile(this)">
                     </div>
-                    <div class="input-hint"><strong>5+ sec required</strong> (10+ recommended) — TTS will mimic this voice</div>
+                    <div class="input-hint" id="voice-cloning-requirement-hint"><strong>5+ sec required</strong> (10+ recommended) — TTS will mimic this voice</div>
                     <div id="chatterbox-prompt-hint" class="input-hint" style="display: none; color: var(--accent);"></div>
                 </div>
 
@@ -128,12 +128,13 @@
                     <div class="form-group">
                         <label for="tts-backend" class="label-with-help">
                             TTS Backend
-                            <span class="help-icon" title="Select TTS engine. Chatterbox offers voice cloning with prompt audio. Pocket TTS is lightweight with built-in voices. Kokoro is a fast ONNX-based TTS.">?</span>
+                            <span class="help-icon" title="Select TTS engine. Chatterbox offers voice cloning with prompt audio. Pocket TTS is lightweight with built-in voices. Kokoro is a fast ONNX-based TTS. OmniVoice supports auto voice, voice design, and prompt-based cloning.">?</span>
                         </label>
             <select id="tts-backend" onchange="updateTTSBackendVisibility()">
               <option value="chatterbox">Chatterbox (Voice Cloning)</option>
               <option value="pocket_tts">Pocket TTS (Lightweight)</option>
               <option value="kokoro">Kokoro (Fast ONNX)</option>
+              <option value="omnivoice">OmniVoice (Multilingual)</option>
             </select>
                     </div>
 
@@ -191,6 +192,16 @@
               </optgroup>
             </select>
             <div class="input-hint">Kokoro v1.0 voices</div>
+          </div>
+
+          <!-- OmniVoice Selection (shown when OmniVoice selected) -->
+          <div class="form-group" id="omnivoice-tts-settings" style="display: none;">
+            <label for="omnivoice-voice" class="label-with-help">
+              OmniVoice Voice
+              <span class="help-icon" title="Use auto for random voice, an instruction like 'female, british accent', or a local path to reference audio for cloning.">?</span>
+            </label>
+            <input type="text" id="omnivoice-voice" value="auto" placeholder="auto | female, low pitch, british accent | C:\\path\\voice.wav">
+            <div class="input-hint">Tip: Prefix with instruct: for explicit voice design; if prompt audio is selected above, it overrides this field</div>
           </div>
 
           <div class="form-group" id="chatterbox-model-section">
@@ -1530,6 +1541,7 @@
             if (!cfg) return;
             document.querySelectorAll('input, select').forEach(el => {
                 if (!el.id) return;
+                if (el.type === 'radio') return;
                 const key = el.id.replace(/-/g, '_');
                 if (!(key in cfg)) return;
                 if (el.type === 'checkbox') el.checked = Boolean(cfg[key]);
@@ -1554,6 +1566,14 @@
                     if (valueSpan) valueSpan.textContent = el.value;
                 }
             });
+
+            // Restore token counting radio group
+            const savedTokenMethod = cfg.tts_token_method;
+            if (savedTokenMethod) {
+                const tokenMethodRadio = document.querySelector(`input[name="token-method"][value="${savedTokenMethod}"]`);
+                if (tokenMethodRadio) tokenMethodRadio.checked = true;
+            }
+
             if (cfg.chatterbox_prompt_path) window.lastChatterboxPromptPath = cfg.chatterbox_prompt_path;
             if (cfg.chatterbox_prompt_filename) {
                 window.lastChatterboxPromptFilename = cfg.chatterbox_prompt_filename;
@@ -1601,6 +1621,7 @@
             const data = {};
             document.querySelectorAll('input, select').forEach(el => {
                 if (!el.id || el.type === 'file') return;
+                if (el.type === 'radio') return;
                 if (['text-input', 'script-select'].includes(el.id)) return;
                 const key = el.id.replace(/-/g, '_');
                 if (el.type === 'checkbox') data[key] = el.checked;
@@ -1608,6 +1629,10 @@
                     const v = parseFloat(el.value); if (!isNaN(v)) data[key] = v;
                 } else if (el.value) data[key] = el.value;
             });
+
+            const selectedTokenMethod = document.querySelector('input[name="token-method"]:checked')?.value;
+            if (selectedTokenMethod) data.tts_token_method = selectedTokenMethod;
+
             if (typeof getBgTracks === 'function') data.bg_tracks = getBgTracks();
             if (window.lastChatterboxPromptPath) data.chatterbox_prompt_path = window.lastChatterboxPromptPath;
             if (window.lastChatterboxPromptFilename) data.chatterbox_prompt_filename = window.lastChatterboxPromptFilename;
@@ -1634,6 +1659,9 @@
         // Get Kokoro TTS voice
         const kokoroVoice = getElementValue('kokoro-tts-voice') || 'af';
 
+        // Get OmniVoice mode/voice string
+        const omnivoiceVoice = (getElementValue('omnivoice-voice') || 'auto').trim() || 'auto';
+
         return {
                 input: text,
                 rvc_model: getElementChecked('enable-rvc') ? getElementValue('model-select') : null,
@@ -1645,6 +1673,7 @@
           chatterbox_model: chatterboxModel,
           pocket_tts_voice: pocketTTSVoice,
           kokoro_voice: kokoroVoice,
+          omnivoice_voice: omnivoiceVoice,
           tts_batch_tokens: parseInt(getElementValue('tts-batch-tokens')) || 50,
                 tts_token_method: document.querySelector('input[name="token-method"]:checked')?.value || 'tiktoken',
                 pitch_algo: getElementValue('pitch-algo') || 'rmvpe+',
@@ -1996,11 +2025,25 @@
           const isChatterbox = backend === 'chatterbox';
           const isPocketTTS = backend === 'pocket_tts';
           const isKokoro = backend === 'kokoro';
+          const isOmniVoice = backend === 'omnivoice';
 
           // Chatterbox sections
           const voiceCloningSection = document.getElementById('chatterbox-voice-cloning-section');
           if (voiceCloningSection) {
-            voiceCloningSection.style.display = isChatterbox ? 'block' : 'none';
+            voiceCloningSection.style.display = (isChatterbox || isOmniVoice) ? 'block' : 'none';
+          }
+
+          const voiceCloningLabel = document.getElementById('voice-cloning-label');
+          const voiceCloningHelp = document.getElementById('voice-cloning-help');
+          const voiceCloningRequirementHint = document.getElementById('voice-cloning-requirement-hint');
+          if (isChatterbox) {
+            if (voiceCloningLabel) voiceCloningLabel.childNodes[0].textContent = 'Voice Cloning Audio (Required for Chatterbox)';
+            if (voiceCloningHelp) voiceCloningHelp.title = 'Reference audio file for voice cloning. 5+ seconds required, 10+ seconds recommended for best results. Only needed for Chatterbox backend.';
+            if (voiceCloningRequirementHint) voiceCloningRequirementHint.innerHTML = '<strong>5+ sec required</strong> (10+ recommended) - TTS will mimic this voice';
+          } else if (isOmniVoice) {
+            if (voiceCloningLabel) voiceCloningLabel.childNodes[0].textContent = 'Voice Cloning Audio (Optional for OmniVoice)';
+            if (voiceCloningHelp) voiceCloningHelp.title = 'Optional reference audio for OmniVoice voice cloning. If provided, this prompt audio is used instead of the OmniVoice Voice text field.';
+            if (voiceCloningRequirementHint) voiceCloningRequirementHint.innerHTML = 'Optional for OmniVoice - select/upload audio to clone; leave empty to use auto/instruct voice';
           }
 
           const chatterboxModelSection = document.getElementById('chatterbox-model-section');
@@ -2018,6 +2061,12 @@
           const kokoroTTSSettings = document.getElementById('kokoro-tts-settings');
           if (kokoroTTSSettings) {
             kokoroTTSSettings.style.display = isKokoro ? 'block' : 'none';
+          }
+
+          // OmniVoice sections
+          const omnivoiceTTSSettings = document.getElementById('omnivoice-tts-settings');
+          if (omnivoiceTTSSettings) {
+            omnivoiceTTSSettings.style.display = isOmniVoice ? 'block' : 'none';
           }
         }
         
@@ -2469,18 +2518,19 @@
 
           // Check prompt audio requirement for Chatterbox (voice cloning)
           const ttsBackend = getElementValue('tts-backend') || 'chatterbox';
+          const promptAudioInput = document.getElementById('chatterbox-prompt-audio');
+          const promptSelect = document.getElementById('audio-prompt-select');
+          const hasNewFile = promptAudioInput && promptAudioInput.files && promptAudioInput.files.length > 0;
+          const hasSelectedPrompt = promptSelect && !!promptSelect.value;
+          const hasSavedPath = window.lastChatterboxPromptPath;
 
-          // Pocket TTS and Kokoro don't require prompt audio (uses built-in voices)
-          if (ttsBackend === 'pocket_tts' || ttsBackend === 'kokoro') {
+          // Pocket TTS, Kokoro, and OmniVoice don't require prompt audio
+          if (ttsBackend === 'pocket_tts' || ttsBackend === 'kokoro' || ttsBackend === 'omnivoice') {
             // No prompt audio validation needed for these backends
           } else {
             // Chatterbox requires prompt audio
-            const promptAudioInput = document.getElementById('chatterbox-prompt-audio');
-            const hasNewFile = promptAudioInput && promptAudioInput.files && promptAudioInput.files.length > 0;
-            const hasSavedPath = window.lastChatterboxPromptPath;
-
             // Voice cloning requires prompt audio
-            if (!hasNewFile && !hasSavedPath) {
+            if (!hasNewFile && !hasSelectedPrompt && !hasSavedPath) {
               showToast('Voice cloning requires a prompt audio file (5+ seconds minimum, 10+ recommended)', 'warn');
               return;
             }
@@ -2529,10 +2579,13 @@
                 }
             }
             
-            // Handle prompt audio upload for voice cloning (Chatterbox only)
-            if (ttsBackend === 'chatterbox') {
+            // Handle prompt audio upload/selection for voice cloning (Chatterbox + OmniVoice)
+            if (ttsBackend === 'chatterbox' || ttsBackend === 'omnivoice') {
                 const promptAudioInput = document.getElementById('chatterbox-prompt-audio');
+                const promptSelect = document.getElementById('audio-prompt-select');
                 const hasNewFile = promptAudioInput && promptAudioInput.files && promptAudioInput.files.length > 0;
+                const hasSelectedPrompt = promptSelect && !!promptSelect.value;
+                const selectedPromptPath = hasSelectedPrompt ? promptSelect.value : null;
                 const hasSavedPath = window.lastChatterboxPromptPath;
                 
                 if (hasNewFile) {
@@ -2553,15 +2606,25 @@
                     
                     const uploadResult = await uploadResponse.json();
                     const uploadedPath = uploadResult.path;
-                    
-                    params.chatterbox_prompt_audio = uploadedPath;
+
+                    if (ttsBackend === 'chatterbox') {
+                        params.chatterbox_prompt_audio = uploadedPath;
+                    } else {
+                        params.omnivoice_voice = uploadedPath;
+                    }
                     
                     // Save the path for future use
                     window.lastChatterboxPromptPath = uploadedPath;
                     window.lastChatterboxPromptFilename = promptAudioInput.files[0].name;
                     saveSettings();
-                } else if (hasSavedPath) {
-                    // Use previously uploaded file path
+                } else if (hasSelectedPrompt) {
+                    if (ttsBackend === 'chatterbox') {
+                        params.chatterbox_prompt_audio = selectedPromptPath;
+                    } else {
+                        params.omnivoice_voice = selectedPromptPath;
+                    }
+                } else if (ttsBackend === 'chatterbox' && hasSavedPath) {
+                    // Chatterbox fallback: use previously uploaded file path
                     params.chatterbox_prompt_audio = hasSavedPath;
                 }
             }

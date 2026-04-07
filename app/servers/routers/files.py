@@ -32,11 +32,28 @@ router = APIRouter(tags=["Files"])
 _executor: Optional[ThreadPoolExecutor] = None
 
 
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+
+
 def _get_executor() -> ThreadPoolExecutor:
     global _executor
     if _executor is None:
         _executor = ThreadPoolExecutor(max_workers=int(os.getenv("MAX_WORKERS", os.cpu_count() or 4)))
     return _executor
+
+
+async def _write_upload_to_path(upload: UploadFile, dest_path: str, chunk_size: int = UPLOAD_CHUNK_SIZE) -> int:
+    """Write an UploadFile to disk incrementally to avoid large in-memory reads."""
+    total_bytes = 0
+    await upload.seek(0)
+    with open(dest_path, "wb") as out_file:
+        while True:
+            chunk = await upload.read(chunk_size)
+            if not chunk:
+                break
+            out_file.write(chunk)
+            total_bytes += len(chunk)
+    return total_bytes
 
 
 # ======================
@@ -146,9 +163,7 @@ async def upload_file(
     os.close(fd)
     
     try:
-        content = await file.read()
-        with open(temp_path, "wb") as f:
-            f.write(content)
+        await _write_upload_to_path(file, temp_path)
         
         return {"path": temp_path, "filename": file.filename}
     except Exception as e:
@@ -205,9 +220,7 @@ async def upload_script(
     dest_path = os.path.join(SCRIPT_DIR, file.filename)
     
     try:
-        content = await file.read()
-        with open(dest_path, "wb") as f:
-            f.write(content)
+        await _write_upload_to_path(file, dest_path)
         return {"status": "uploaded", "filename": file.filename}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -336,9 +349,7 @@ async def blend_background_audio(
         os.close(fd_main)
         temp_files.append(tmp_main)
         
-        content = await main_audio.read()
-        with open(tmp_main, "wb") as f:
-            f.write(content)
+        await _write_upload_to_path(main_audio, tmp_main)
         
         # Convert to WAV, preserving original sample rate and quality
         from util.audio_utils import get_audio_info

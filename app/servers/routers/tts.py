@@ -10,6 +10,8 @@ Handles:
 
 import json
 import os
+import time
+import asyncio
 import uuid
 from typing import Optional
 
@@ -32,6 +34,25 @@ from servers.services.pipeline import (
 from util.file_utils import validate_model_exists
 from util.clients import get_chatterbox_client
 from config import get_config_value
+
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+VF_VERBOSE_LOGS = _env_flag("VF_VERBOSE_LOGS", "0")
+VF_METRICS_LOGS = _env_flag("VF_METRICS_LOGS", "0")
+
+
+def _log_verbose(message: str):
+    if VF_VERBOSE_LOGS:
+        print(message)
+
+
+def _log_metrics(message: str):
+    if VF_METRICS_LOGS:
+        print(message)
 
 
 router = APIRouter(tags=["TTS"])
@@ -98,10 +119,10 @@ async def cancel_tts_generation(
     If request_id is provided, cancels that specific request.
     If not provided, cancels all active requests.
     """
-    print(f"[Cancel] Request to cancel: {request_id or 'ALL'}")
+    _log_verbose(f"[Cancel] Request to cancel: {request_id or 'ALL'}")
     if request_id:
         success = cancel_generation(request_id)
-        print(f"[Cancel] cancel_generation({request_id}) returned: {success}")
+        _log_verbose(f"[Cancel] cancel_generation({request_id}) returned: {success}")
         if success:
             # Flag is set - workers will stop after current chunk finishes
             # Note: PyTorch model.generate() cannot be interrupted mid-execution
@@ -114,7 +135,7 @@ async def cancel_tts_generation(
             return {"status": "ok", "message": f"Request {request_id} not found or already completed"}
     else:
         count = cancel_all_generations()
-        print(f"[Cancel] cancel_all_generations() returned: {count}")
+        _log_verbose(f"[Cancel] cancel_all_generations() returned: {count}")
         return {"status": "ok", "message": f"Cancelled {count} request(s)", "cancelled": count}
 
 
@@ -146,10 +167,13 @@ async def create_speech(
     if rvc_model:
         request.rvc_model = rvc_model
     
-    print(f"[{request_id}] TTS request: mode={request.tts_mode}, backend={request.tts_backend}, rvc={request.rvc_model}")
+    _log_verbose(f"[{request_id}] TTS request: mode={request.tts_mode}, backend={request.tts_backend}, rvc={request.rvc_model}")
     
     # Run pipeline with request_id for cancellation support
-    result = await generate_audio(request, request_id=request_id)
+    try:
+        result = await generate_audio(request, request_id=request_id)
+    except asyncio.CancelledError:
+        raise HTTPException(status_code=499, detail="Request cancelled")
     
     try:
         if not result.success:
@@ -205,7 +229,7 @@ async def generate_speech_stream(
     
     # Log exact input text (repr) so debugging is unambiguous.
     # Do not append artificial ellipsis here.
-    print(f"[{request_id}] === REQUEST ARRIVED at {arrival_time:.3f} === input_len={len(request.input)} input={request.input!r}")
+    _log_verbose(f"[{request_id}] === REQUEST ARRIVED at {arrival_time:.3f} === input_len={len(request.input)} input={request.input!r}")
     
     if not request.input or not request.input.strip():
         raise HTTPException(status_code=400, detail="Input text cannot be empty")
@@ -215,11 +239,27 @@ async def generate_speech_stream(
     if rvc_model:
         request.rvc_model = rvc_model
     
-    print(f"[{request_id}] TTS stream request: backend={request.tts_backend}, rvc={request.rvc_model}")
+    _log_verbose(f"[{request_id}] TTS stream request: backend={request.tts_backend}, rvc={request.rvc_model}")
     
     async def event_generator():
         """Generate SSE events from the streaming pipeline."""
+        stream_started = time.perf_counter()
+        first_chunk_at = None
+        chunk_count = 0
+
         async for event in generate_audio_streaming(request, request_id=request_id):
+            if event.get("type") == "chunk":
+                chunk_count += 1
+                if first_chunk_at is None:
+                    first_chunk_at = time.perf_counter() - stream_started
+            elif event.get("type") in {"complete", "error", "cancelled"}:
+                elapsed = time.perf_counter() - stream_started
+                ttfa = first_chunk_at if first_chunk_at is not None else elapsed
+                _log_metrics(
+                    f"[{request_id}] ROUTER STREAM METRICS chunks={chunk_count} "
+                    f"ttfa_ms={ttfa*1000:.0f} total_ms={elapsed*1000:.0f} "
+                    f"status={event.get('type')}"
+                )
             yield f"data: {json.dumps(event)}\n\n"
     
     return StreamingResponse(

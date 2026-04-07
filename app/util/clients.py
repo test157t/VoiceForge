@@ -25,6 +25,19 @@ from pathlib import Path
 from typing import Optional, Callable, Literal, Dict, Any
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+VF_VERBOSE_LOGS = _env_flag("VF_VERBOSE_LOGS", "0")
+
+
+def _log_verbose(message: str):
+    if VF_VERBOSE_LOGS:
+        print(message)
+
+
 def normalize_base_url(url: str) -> str:
     """Ensure a base URL always includes http:// or https://"""
     if not url.startswith(("http://", "https://")):
@@ -114,6 +127,7 @@ RVC_SERVER_URL = normalize_base_url(os.getenv("RVC_SERVER_URL", "127.0.0.1:8891"
 CHATTERBOX_SERVER_URL = normalize_base_url(os.getenv("CHATTERBOX_SERVER_URL", "127.0.0.1:8893"))
 POCKET_TTS_SERVER_URL = normalize_base_url(os.getenv("POCKET_TTS_SERVER_URL", "127.0.0.1:8894"))
 KOKORO_TTS_SERVER_URL = normalize_base_url(os.getenv("KOKORO_TTS_SERVER_URL", "127.0.0.1:8897"))
+OMNIVOICE_TTS_SERVER_URL = normalize_base_url(os.getenv("OMNIVOICE_TTS_SERVER_URL", "127.0.0.1:8898"))
 
 AUDIO_SERVICES_SERVER_URL = normalize_base_url(os.getenv("AUDIO_SERVICES_SERVER_URL", "127.0.0.1:8892"))
 POSTPROCESS_SERVER_URL = normalize_base_url(os.getenv("POSTPROCESS_SERVER_URL", AUDIO_SERVICES_SERVER_URL))
@@ -2447,6 +2461,190 @@ class KokoroTTSClient(BaseServiceClient):
             raise RuntimeError(f"Kokoro TTS streaming generation failed: {e}")
 
 
+class OmniVoiceTTSClient(BaseServiceClient):
+    """Client for the OmniVoice TTS server.
+
+    OmniVoice supports:
+    - Auto voice generation
+    - Voice design via instruct text
+    - Voice cloning via reference audio path
+    - OpenAI-compatible /v1/audio/speech API
+    """
+
+    def __init__(self, server_url: str = None):
+        super().__init__(server_url or OMNIVOICE_TTS_SERVER_URL)
+        self._server_available = None
+
+    def is_available(self) -> bool:
+        """Check if OmniVoice server is available (with caching)."""
+        if self._server_available:
+            return True
+
+        result = super().is_available()
+        if result:
+            self._server_available = True
+        return result
+
+    def reset_availability_cache(self):
+        """Reset the availability cache."""
+        self._server_available = None
+
+    def get_status(self) -> dict:
+        """Get server status."""
+        status = super().get_status()
+        if "model_loaded" not in status:
+            status["model_loaded"] = False
+        return status
+
+    def generate(
+        self,
+        text: str,
+        voice: str = "auto",
+        ref_text: Optional[str] = None,
+        speed: float = 1.0,
+        max_tokens: int = 50,
+        token_method: str = "tiktoken",
+        prechunked: bool = False,
+        request_id: str = None,
+    ) -> str:
+        """Generate TTS audio using OmniVoice."""
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        try:
+            payload = {
+                "model": "omnivoice-tts",
+                "input": text,
+                "voice": voice,
+                "response_format": "wav",
+                "speed": speed,
+                "max_tokens": max_tokens,
+                "token_method": token_method,
+                "prechunked": bool(prechunked),
+            }
+            if ref_text and ref_text.strip():
+                payload["ref_text"] = ref_text.strip()
+
+            logger.info(f"[OmniVoice] Sending request to {self.server_url}/v1/audio/speech")
+            logger.info(f"[OmniVoice] Payload: voice={voice}, text_len={len(text)}")
+            print(f"[OmniVoice] Sending request to {self.server_url}/v1/audio/speech")
+
+            response = self.session.post(
+                f"{self.server_url}/v1/audio/speech",
+                json=payload,
+                timeout=3600,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(f"OmniVoice server error: {response.status_code} - {response.text}")
+
+            fd, output_path = tempfile.mkstemp(suffix="_omnivoice_tts.wav")
+            os.close(fd)
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+            return output_path
+
+        except requests.exceptions.ConnectionError:
+            raise self._handle_connection_error(
+                "OmniVoice TTS",
+                "Please start the OmniVoice server.",
+            )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            raise RuntimeError(f"OmniVoice TTS generation failed: {e}")
+
+    def stream_events(
+        self,
+        text: str,
+        voice: str = "auto",
+        speed: float = 1.0,
+        max_tokens: int = 50,
+        token_method: str = "tiktoken",
+        request_id: str = None,
+        stop_event: Optional[threading.Event] = None,
+    ):
+        """
+        Stream OmniVoice SSE events as they arrive.
+
+        Yields:
+            dict events with:
+            - type: "start" | "chunk" | "complete"
+            - audio_bytes (for chunk events)
+        """
+        import base64
+        import json
+
+        payload = {
+            "model": "omnivoice-tts",
+            "input": text,
+            "voice": voice,
+            "response_format": "wav",
+            "speed": speed,
+            "max_tokens": max_tokens,
+            "token_method": token_method,
+        }
+        if request_id:
+            payload["request_id"] = request_id
+
+        response = None
+        try:
+            response = self.session.post(
+                f"{self.server_url}/v1/audio/speech/stream",
+                json=payload,
+                stream=True,
+                timeout=3600,
+            )
+
+            if response.status_code != 200:
+                raise RuntimeError(f"OmniVoice stream error: {response.status_code} - {response.text}")
+
+            buffer = ""
+            for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
+                if stop_event and stop_event.is_set():
+                    break
+                if not chunk:
+                    continue
+
+                buffer += chunk
+                while "\n\n" in buffer:
+                    event, buffer = buffer.split("\n\n", 1)
+                    if not event.startswith("data: "):
+                        continue
+
+                    try:
+                        event_data = json.loads(event[6:])
+                    except json.JSONDecodeError:
+                        continue
+
+                    event_type = event_data.get("type")
+                    if event_type == "chunk":
+                        audio_b64 = event_data.get("audio_bytes_b64", "") or event_data.get("audio", "")
+                        if not audio_b64:
+                            continue
+                        event_data["audio_bytes"] = base64.b64decode(audio_b64)
+
+                    if event_type == "error":
+                        raise RuntimeError(f"Stream error: {event_data.get('message')}")
+
+                    yield event_data
+
+                    if event_type == "complete":
+                        return
+        except requests.exceptions.ConnectionError:
+            raise self._handle_connection_error(
+                "OmniVoice TTS",
+                "Please start the OmniVoice server.",
+            )
+        finally:
+            try:
+                if response is not None:
+                    response.close()
+            except Exception:
+                pass
+
+
 # ============================================
 # GLOBAL INSTANCES AND HELPER FUNCTIONS
 # ============================================
@@ -2458,6 +2656,7 @@ _rvc_client = None
 _chatterbox_client = None
 _pocket_tts_client = None
 _kokoro_tts_client = None
+_omnivoice_tts_client = None
 
 
 # ASR helpers (Whisper - default)
@@ -3051,7 +3250,7 @@ def run_resample(
         Path to processed audio file
     """
     if request_id:
-        print(f"[{request_id}] Resampling to {sample_rate}Hz, volume={volume}")
+        _log_verbose(f"[{request_id}] Resampling to {sample_rate}Hz, volume={volume}")
     
     client = get_postprocess_client()
     
@@ -3082,7 +3281,7 @@ def run_process_chunk(
         Path to processed audio file
     """
     if request_id:
-        print(f"[{request_id}] Processing chunk: post={post_params is not None}, sr={target_sample_rate}, vol={output_volume}")
+        _log_verbose(f"[{request_id}] Processing chunk: post={post_params is not None}, sr={target_sample_rate}, vol={output_volume}")
     
     client = get_postprocess_client()
     
@@ -3134,6 +3333,20 @@ def is_kokoro_tts_server_available() -> bool:
     return get_kokoro_tts_client().is_available()
 
 
+# OmniVoice TTS helpers
+def get_omnivoice_tts_client() -> OmniVoiceTTSClient:
+    """Get or create the global OmniVoice TTS client."""
+    global _omnivoice_tts_client
+    if _omnivoice_tts_client is None:
+        _omnivoice_tts_client = OmniVoiceTTSClient()
+    return _omnivoice_tts_client
+
+
+def is_omnivoice_tts_server_available() -> bool:
+    """Check if OmniVoice TTS server is available."""
+    return get_omnivoice_tts_client().is_available()
+
+
 # Export all public symbols
 __all__ = [
     # Base
@@ -3145,6 +3358,7 @@ __all__ = [
     'ChatterboxClient',
     'PocketTTSClient',
     'KokoroTTSClient',
+    'OmniVoiceTTSClient',
     'PostProcessClient',
     'PreprocessClient',
     # ASR helpers (Whisper)
@@ -3183,6 +3397,9 @@ __all__ = [
     # Kokoro TTS helpers
     'get_kokoro_tts_client',
     'is_kokoro_tts_server_available',
+    # OmniVoice TTS helpers
+    'get_omnivoice_tts_client',
+    'is_omnivoice_tts_server_available',
     # Server URLs
     'get_shared_session',
     'WHISPERASR_SERVER_URL',
@@ -3191,5 +3408,6 @@ __all__ = [
     'CHATTERBOX_SERVER_URL',
     'POCKET_TTS_SERVER_URL',
     'KOKORO_TTS_SERVER_URL',
+    'OMNIVOICE_TTS_SERVER_URL',
     'AUDIO_SERVICES_SERVER_URL',
 ]
