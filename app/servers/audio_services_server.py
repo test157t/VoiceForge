@@ -879,7 +879,7 @@ async def stop_background_stream(session_id: str = Form(...), character: str = F
     with _bg_stream_lock:
         if session_id in _bg_stream_processes:
             item = _bg_stream_processes.pop(session_id)
-            # Item could be a file path (new) or process (legacy)
+            # Item could be a file path or process handle
             if isinstance(item, str):
                 # Only delete if it's a temp file, not a cached file
                 # Cached files are in OUTPUT_DIR/background_streams/ and should persist
@@ -2199,11 +2199,21 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
+    def _env_flag(name: str, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     parser = argparse.ArgumentParser(description="VoiceForge Audio Services Server")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8892)
     args = parser.parse_args()
 
     log_info(f"Starting Audio Services server on {args.host}:{args.port}")
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=os.getenv("VF_UVICORN_LOG_LEVEL", "warning").lower(),
+        access_log=_env_flag("VF_ACCESS_LOGS", "0"),
+    )
 

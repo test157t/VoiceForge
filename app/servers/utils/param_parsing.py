@@ -17,11 +17,11 @@ from servers.models.params import (
 
 def parse_json_params(param_string: Optional[str], default_dict: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Parse JSON parameter string with defaults fallback.
+    Parse JSON parameter string with strict validation.
     
     Args:
         param_string: JSON string to parse (can be None)
-        default_dict: Default values to use if parsing fails or param_string is None
+        default_dict: Default values to use when param_string is None
         
     Returns:
         Dictionary of parsed parameters merged with defaults
@@ -35,9 +35,8 @@ def parse_json_params(param_string: Optional[str], default_dict: Dict[str, Any])
         result = default_dict.copy()
         result.update(parsed)
         return result
-    except json.JSONDecodeError:
-        # If JSON is invalid, return defaults
-        return default_dict.copy()
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON parameter payload: {e}") from e
 
 
 def parse_rvc_params(param_string: Optional[str]) -> RVCParams:

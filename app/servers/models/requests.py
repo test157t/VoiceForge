@@ -27,9 +27,9 @@ class TTSRequest(BaseModel):
         default="chunked",
         description="Generation mode: 'chunked' (wait for complete) or 'streaming' (progressive)"
     )
-    tts_backend: Literal["chatterbox", "pocket_tts", "kokoro", "omnivoice"] = Field(
+    tts_backend: Literal["chatterbox", "pocket_tts", "kokoro", "omnivoice", "omnivoice_onnx"] = Field(
         default="chatterbox",
-        description="TTS backend: chatterbox, pocket_tts, kokoro, or omnivoice"
+        description="TTS backend: chatterbox, pocket_tts, kokoro, omnivoice, or omnivoice_onnx"
     )
     tts_batch_tokens: int = Field(default=100, description="Max tokens per TTS batch")
     tts_token_method: str = Field(default="tiktoken", description="Token counting method")
@@ -128,7 +128,7 @@ class TTSRequest(BaseModel):
     background_volume: float = Field(default=0.3, ge=0.0, le=1.0, description="Background volume")
     background_delay: float = Field(default=0.0, ge=0.0, description="Background delay (seconds)")
     server_mix_background: bool = Field(default=True, description="Mix background on server (vs client-side)")
-    main_audio_volume: float = Field(default=1.0, ge=0.0, le=2.0, description="Main audio volume for blending (legacy)")
+    main_audio_volume: float = Field(default=1.0, ge=0.0, le=2.0, description="Main audio volume for blending")
     output_volume: float = Field(default=1.0, ge=0.0, le=3.0, description="Final output volume (applied to saved files)")
     use_config_bg_tracks: bool = Field(default=False, description="Use bg_tracks from config")
     save_output: bool = Field(default=False, description="Save final output to server output directory")
@@ -180,8 +180,9 @@ class TTSRequest(BaseModel):
         """Extract background parameters as dataclass."""
         files = self.bg_files
         volumes = self.bg_volumes if self.bg_volumes else [self.background_volume] * len(files)
-        # Use bg_delays if provided, otherwise use legacy single background_delay
-        delays = self.bg_delays if self.bg_delays else [self.background_delay] * len(files) if files else []
+        delays = self.bg_delays
+        if files and len(delays) == 0:
+            raise ValueError("bg_delays is required when bg_files is provided")
         fade_ins = self.bg_fade_ins if self.bg_fade_ins else [0.0] * len(files)
         fade_outs = self.bg_fade_outs if self.bg_fade_outs else [0.0] * len(files)
         

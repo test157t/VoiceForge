@@ -15,8 +15,9 @@ import asyncio
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response, StreamingResponse
+import requests
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Form
+from fastapi.responses import Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 # Import common (sets up sys.path)
@@ -32,7 +33,7 @@ from servers.services.pipeline import (
     get_active_requests,
 )
 from util.file_utils import validate_model_exists
-from util.clients import get_chatterbox_client
+from util.clients import get_chatterbox_client, AUDIO_SERVICES_SERVER_URL
 from config import get_config_value
 
 
@@ -56,6 +57,71 @@ def _log_metrics(message: str):
 
 
 router = APIRouter(tags=["TTS"])
+
+
+@router.get("/v1/background/stream")
+async def proxy_background_stream(
+    request: Request,
+):
+    """Proxy background stream through main HTTPS server."""
+    target_url = f"{AUDIO_SERVICES_SERVER_URL}/v1/background/stream"
+    params = dict(request.query_params)
+
+    try:
+        upstream = requests.get(target_url, params=params, stream=True, timeout=(10, 900))
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Background stream upstream unavailable: {e}")
+
+    if upstream.status_code >= 400:
+        detail = ""
+        try:
+            detail = upstream.text[:1200]
+        except Exception:
+            detail = ""
+        upstream.close()
+        raise HTTPException(status_code=upstream.status_code, detail=detail or "Background stream upstream error")
+
+    media_type = upstream.headers.get("content-type", "audio/wav")
+
+    def iter_stream():
+        try:
+            for chunk in upstream.iter_content(chunk_size=65536):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    return StreamingResponse(iter_stream(), media_type=media_type)
+
+
+@router.post("/v1/background/stop-stream")
+async def proxy_background_stop_stream(
+    session_id: str = Form(...),
+    character: Optional[str] = Form(default=None),
+):
+    """Proxy background stop request through main HTTPS server."""
+    target_url = f"{AUDIO_SERVICES_SERVER_URL}/v1/background/stop-stream"
+    data = {"session_id": session_id}
+    if character:
+        data["character"] = character
+
+    try:
+        upstream = requests.post(target_url, data=data, timeout=30)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Background stop upstream unavailable: {e}")
+
+    if upstream.status_code >= 400:
+        detail = ""
+        try:
+            detail = upstream.text[:1200]
+        except Exception:
+            detail = ""
+        raise HTTPException(status_code=upstream.status_code, detail=detail or "Background stop upstream error")
+
+    try:
+        return JSONResponse(content=upstream.json())
+    except Exception:
+        return JSONResponse(content={"status": "ok", "message": "stop-stream proxied"})
 
 
 class WarmupRequest(BaseModel):

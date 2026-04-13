@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 import io
+import inspect
 import json
 import logging
 import os
@@ -22,12 +23,37 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 omnivoice_model = None
-OMNIVOICE_MODEL_ID = "k2-fsa/OmniVoice"
+DEFAULT_OMNIVOICE_MODEL_ID = "k2-fsa/OmniVoice"
+DEFAULT_OMNIVOICE_ONNX_MODEL_ID = "gluschenko/omnivoice-onnx"
 OMNIVOICE_SAMPLE_RATE = 24000
 TARGET_SAMPLE_RATE = 48000
 ASR_SERVER_URL = os.getenv("ASR_SERVER_URL", "http://127.0.0.1:8889").rstrip("/")
 OMNIVOICE_USE_EXTERNAL_ASR = os.getenv("OMNIVOICE_USE_EXTERNAL_ASR", "1").strip().lower() in {"1", "true", "yes", "on"}
 OMNIVOICE_EXTERNAL_ASR_MODEL = os.getenv("OMNIVOICE_EXTERNAL_ASR_MODEL", "glm-asr-nano")
+
+
+def _normalize_runtime(value: str) -> str:
+    runtime = (value or "torch").strip().lower()
+    if runtime in {"onnx", "onnx-cpu", "onnx_cpu", "onnxcpu"}:
+        return "onnx-cpu"
+    return "torch"
+
+
+OMNIVOICE_RUNTIME = _normalize_runtime(os.getenv("OMNIVOICE_RUNTIME", "torch"))
+_model_from_env = os.getenv("OMNIVOICE_MODEL_ID", "").strip()
+if _model_from_env:
+    OMNIVOICE_MODEL_ID = _model_from_env
+elif OMNIVOICE_RUNTIME == "onnx-cpu":
+    OMNIVOICE_MODEL_ID = DEFAULT_OMNIVOICE_ONNX_MODEL_ID
+else:
+    OMNIVOICE_MODEL_ID = DEFAULT_OMNIVOICE_MODEL_ID
+
+OMNIVOICE_ONNX_MODEL_FILE = os.getenv("OMNIVOICE_ONNX_MODEL_FILE", "onnx/omnivoice.qint8.onnx").strip()
+OMNIVOICE_ONNX_PROVIDERS = [
+    provider.strip()
+    for provider in os.getenv("OMNIVOICE_ONNX_PROVIDERS", "CPUExecutionProvider").split(",")
+    if provider.strip()
+]
 
 VOICE_GUIDE = [
     "auto",
@@ -216,30 +242,84 @@ def _generate_chunk_audio(text: str, voice: str, ref_text: Optional[str], speed:
     return (audio * 32767.0).astype(np.int16)
 
 
+def _from_pretrained_supported_kwargs(cls, model_id: str, kwargs: Dict[str, Any]):
+    fn = cls.from_pretrained
+    sig = inspect.signature(fn)
+    params = sig.parameters
+    supports_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    if supports_kwargs:
+        return fn(model_id, **kwargs)
+
+    filtered = {k: v for k, v in kwargs.items() if k in params}
+    return fn(model_id, **filtered)
+
+
+def _load_torch_runtime_model():
+    from omnivoice import OmniVoice
+
+    if torch.cuda.is_available():
+        device_map = "cuda:0"
+        dtype = torch.float16
+    elif torch.backends.mps.is_available():
+        device_map = "mps"
+        dtype = torch.float32
+    else:
+        device_map = "cpu"
+        dtype = torch.float32
+
+    model = OmniVoice.from_pretrained(
+        OMNIVOICE_MODEL_ID,
+        device_map=device_map,
+        dtype=dtype,
+    )
+    return model, f"torch runtime on {device_map} (dtype={dtype})"
+
+
+def _load_onnx_cpu_runtime_model():
+    from omnivoice import OmniVoice
+
+    common = {
+        "device_map": "cpu",
+        "dtype": torch.float32,
+        "providers": OMNIVOICE_ONNX_PROVIDERS,
+    }
+
+    # Different OmniVoice releases/export wrappers may use different keyword names.
+    # Try common variants without hard-coding to one specific fork.
+    candidates = [
+        {**common, "runtime": "onnx", "onnx_model_file": OMNIVOICE_ONNX_MODEL_FILE},
+        {**common, "backend": "onnx", "onnx_model_file": OMNIVOICE_ONNX_MODEL_FILE},
+        {**common, "onnx": True, "onnx_model_file": OMNIVOICE_ONNX_MODEL_FILE},
+        {**common, "onnx_model_file": OMNIVOICE_ONNX_MODEL_FILE},
+        {**common, "onnx_filename": OMNIVOICE_ONNX_MODEL_FILE},
+        {**common, "model_file": OMNIVOICE_ONNX_MODEL_FILE},
+        {**common},
+    ]
+
+    errors = []
+    for kwargs in candidates:
+        try:
+            model = _from_pretrained_supported_kwargs(OmniVoice, OMNIVOICE_MODEL_ID, kwargs)
+            detail = f"onnx-cpu runtime (providers={OMNIVOICE_ONNX_PROVIDERS}, file={OMNIVOICE_ONNX_MODEL_FILE})"
+            return model, detail
+        except Exception as exc:
+            errors.append(f"kwargs={sorted(kwargs.keys())}: {exc}")
+
+    raise RuntimeError("Unable to load OmniVoice ONNX runtime. Tried multiple loader variants. " + " | ".join(errors))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global omnivoice_model
 
     logger.info("Loading OmniVoice model...")
     try:
-        from omnivoice import OmniVoice
-
-        if torch.cuda.is_available():
-            device_map = "cuda:0"
-            dtype = torch.float16
-        elif torch.backends.mps.is_available():
-            device_map = "mps"
-            dtype = torch.float32
+        if OMNIVOICE_RUNTIME == "onnx-cpu":
+            omnivoice_model, detail = _load_onnx_cpu_runtime_model()
         else:
-            device_map = "cpu"
-            dtype = torch.float32
-
-        omnivoice_model = OmniVoice.from_pretrained(
-            OMNIVOICE_MODEL_ID,
-            device_map=device_map,
-            dtype=dtype,
-        )
-        logger.info(f"OmniVoice loaded successfully on {device_map} (dtype={dtype})")
+            omnivoice_model, detail = _load_torch_runtime_model()
+        logger.info(f"OmniVoice loaded successfully with {detail}")
     except Exception as e:
         logger.error(f"Failed to load OmniVoice model: {e}")
         raise
@@ -281,6 +361,7 @@ async def root():
     return {
         "service": "OmniVoice Server",
         "model": OMNIVOICE_MODEL_ID,
+        "runtime": OMNIVOICE_RUNTIME,
         "endpoints": {
             "health": "/health",
             "models": "/v1/models",
@@ -297,6 +378,8 @@ async def health():
         "status": "healthy",
         "model_loaded": omnivoice_model is not None,
         "model": OMNIVOICE_MODEL_ID,
+        "runtime": OMNIVOICE_RUNTIME,
+        "onnx_model_file": OMNIVOICE_ONNX_MODEL_FILE if OMNIVOICE_RUNTIME == "onnx-cpu" else None,
         "output_sample_rate": TARGET_SAMPLE_RATE,
     }
 
@@ -473,6 +556,10 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
+    def _env_flag(name: str, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     parser = argparse.ArgumentParser(description="OmniVoice Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8898, help="Port to bind to")
@@ -497,4 +584,6 @@ if __name__ == "__main__":
         port=args.port,
         proxy_headers=True,
         forwarded_allow_ips="*",
+        log_level=os.getenv("VF_UVICORN_LOG_LEVEL", "warning").lower(),
+        access_log=_env_flag("VF_ACCESS_LOGS", "0"),
     )

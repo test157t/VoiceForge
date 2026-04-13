@@ -352,7 +352,7 @@ def _split_text_into_chunks(text: str, max_tokens: int = 50) -> list:
     Uses the existing split_text utility which properly handles:
     - Token counting
     - Sentence boundaries first
-    - Clause boundaries (commas, semicolons) as fallback
+    - Clause boundaries (commas, semicolons) when needed
     - Word boundaries as last resort
     
     Args:
@@ -591,6 +591,10 @@ if __name__ == "__main__":
     import uvicorn
     import argparse
 
+    def _env_flag(name: str, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     parser = argparse.ArgumentParser(description="Pocket TTS Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8894, help="Port to bind to")
@@ -615,4 +619,6 @@ if __name__ == "__main__":
         port=args.port,
         proxy_headers=True,
         forwarded_allow_ips="*",
+        log_level=os.getenv("VF_UVICORN_LOG_LEVEL", "warning").lower(),
+        access_log=_env_flag("VF_ACCESS_LOGS", "0"),
     )

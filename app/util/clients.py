@@ -128,6 +128,7 @@ CHATTERBOX_SERVER_URL = normalize_base_url(os.getenv("CHATTERBOX_SERVER_URL", "1
 POCKET_TTS_SERVER_URL = normalize_base_url(os.getenv("POCKET_TTS_SERVER_URL", "127.0.0.1:8894"))
 KOKORO_TTS_SERVER_URL = normalize_base_url(os.getenv("KOKORO_TTS_SERVER_URL", "127.0.0.1:8897"))
 OMNIVOICE_TTS_SERVER_URL = normalize_base_url(os.getenv("OMNIVOICE_TTS_SERVER_URL", "127.0.0.1:8898"))
+OMNIVOICE_ONNX_TTS_SERVER_URL = normalize_base_url(os.getenv("OMNIVOICE_ONNX_TTS_SERVER_URL", "127.0.0.1:8899"))
 
 AUDIO_SERVICES_SERVER_URL = normalize_base_url(os.getenv("AUDIO_SERVICES_SERVER_URL", "127.0.0.1:8892"))
 POSTPROCESS_SERVER_URL = normalize_base_url(os.getenv("POSTPROCESS_SERVER_URL", AUDIO_SERVICES_SERVER_URL))
@@ -2657,6 +2658,7 @@ _chatterbox_client = None
 _pocket_tts_client = None
 _kokoro_tts_client = None
 _omnivoice_tts_client = None
+_omnivoice_onnx_tts_client = None
 
 
 # ASR helpers (Whisper - default)
@@ -3347,6 +3349,19 @@ def is_omnivoice_tts_server_available() -> bool:
     return get_omnivoice_tts_client().is_available()
 
 
+def get_omnivoice_onnx_tts_client() -> OmniVoiceTTSClient:
+    """Get or create the global OmniVoice ONNX TTS client."""
+    global _omnivoice_onnx_tts_client
+    if _omnivoice_onnx_tts_client is None:
+        _omnivoice_onnx_tts_client = OmniVoiceTTSClient(server_url=OMNIVOICE_ONNX_TTS_SERVER_URL)
+    return _omnivoice_onnx_tts_client
+
+
+def is_omnivoice_onnx_tts_server_available() -> bool:
+    """Check if OmniVoice ONNX TTS server is available."""
+    return get_omnivoice_onnx_tts_client().is_available()
+
+
 # Export all public symbols
 __all__ = [
     # Base
@@ -3400,6 +3415,8 @@ __all__ = [
     # OmniVoice TTS helpers
     'get_omnivoice_tts_client',
     'is_omnivoice_tts_server_available',
+    'get_omnivoice_onnx_tts_client',
+    'is_omnivoice_onnx_tts_server_available',
     # Server URLs
     'get_shared_session',
     'WHISPERASR_SERVER_URL',
@@ -3409,5 +3426,6 @@ __all__ = [
     'POCKET_TTS_SERVER_URL',
     'KOKORO_TTS_SERVER_URL',
     'OMNIVOICE_TTS_SERVER_URL',
+    'OMNIVOICE_ONNX_TTS_SERVER_URL',
     'AUDIO_SERVICES_SERVER_URL',
 ]

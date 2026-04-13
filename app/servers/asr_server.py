@@ -75,6 +75,12 @@ import queue
 import io
 import base64
 
+
+def _env_flag(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Check PyTorch/CUDA
 import torch
 if torch.cuda.is_available():
@@ -341,6 +347,16 @@ _parakeet_model_lock = threading.Lock()
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 DEFAULT_GLM_MODEL = "glm-asr-nano"
 
+# GLM-ASR memory/perf tuning knobs
+# - none: full precision weights on GPU
+# - 8bit: ~40-50% less VRAM, requires bitsandbytes
+# - 4bit: ~60-75% less VRAM, requires bitsandbytes (best-effort quality)
+GLM_ASR_QUANTIZATION = os.getenv("GLM_ASR_QUANTIZATION", "none").strip().lower()
+GLM_ASR_DTYPE = os.getenv("GLM_ASR_DTYPE", "auto").strip().lower()
+GLM_ASR_USE_CACHE = _env_flag("GLM_ASR_USE_CACHE", "0")
+GLM_ASR_GPU_MEMORY_GB = float(os.getenv("GLM_ASR_GPU_MEMORY_GB", "0") or 0)
+GLM_ASR_MAX_NEW_TOKENS = int(os.getenv("GLM_ASR_MAX_NEW_TOKENS", "500") or 500)
+
 PARAKEET_MODELS = {
     "parakeet-tdt-0.6b-v2": "nvidia/parakeet-tdt-0.6b-v2",
     "parakeet-tdt-0.6b-v3": "nvidia/parakeet-tdt-0.6b-v3",
@@ -385,22 +401,76 @@ def load_glm_model(model_name: str = None):
             
             # Load model
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            dtype = torch.bfloat16 if device == "cuda" else torch.float32
-            
-            _glm_model = AutoModelForSeq2SeqLM.from_pretrained(
-                GLM_ASR_MODEL_ID,
-                cache_dir=str(APP_DIR / "models" / "glm_asr"),
-                torch_dtype=dtype,
-                device_map="auto" if device == "cuda" else None,
-                trust_remote_code=True
-            )
-            
+            dtype_map = {
+                "float32": torch.float32,
+                "float16": torch.float16,
+                "fp16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "bf16": torch.bfloat16,
+                "auto": torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+            }
+            dtype = dtype_map.get(GLM_ASR_DTYPE, torch.float16) if device == "cuda" else torch.float32
+
+            model_kwargs = {
+                "cache_dir": str(APP_DIR / "models" / "glm_asr"),
+                "trust_remote_code": True,
+                "low_cpu_mem_usage": True,
+            }
+
+            if device == "cuda":
+                model_kwargs["device_map"] = "auto"
+
+                if GLM_ASR_GPU_MEMORY_GB > 0:
+                    model_kwargs["max_memory"] = {0: f"{GLM_ASR_GPU_MEMORY_GB:.0f}GiB", "cpu": "48GiB"}
+                    model_kwargs["offload_folder"] = str(APP_DIR / "models" / "glm_asr" / "offload")
+                    log_info(f"GLM-ASR GPU memory cap enabled: ~{GLM_ASR_GPU_MEMORY_GB:.0f}GiB (CPU offload active)")
+
+                quant_mode = GLM_ASR_QUANTIZATION
+                if quant_mode in {"8bit", "int8"}:
+                    try:
+                        from transformers import BitsAndBytesConfig
+                        model_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+                        model_kwargs["torch_dtype"] = torch.float16
+                        log_info("GLM-ASR quantization enabled: 8-bit")
+                    except Exception as e:
+                        log_warn(f"8-bit quantization requested but unavailable ({e}); falling back to {GLM_ASR_DTYPE}")
+                        model_kwargs["torch_dtype"] = dtype
+                elif quant_mode in {"4bit", "int4"}:
+                    try:
+                        from transformers import BitsAndBytesConfig
+                        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                            load_in_4bit=True,
+                            bnb_4bit_quant_type="nf4",
+                            bnb_4bit_use_double_quant=True,
+                            bnb_4bit_compute_dtype=torch.float16,
+                        )
+                        model_kwargs["torch_dtype"] = torch.float16
+                        log_info("GLM-ASR quantization enabled: 4-bit (NF4)")
+                    except Exception as e:
+                        log_warn(f"4-bit quantization requested but unavailable ({e}); falling back to {GLM_ASR_DTYPE}")
+                        model_kwargs["torch_dtype"] = dtype
+                else:
+                    model_kwargs["torch_dtype"] = dtype
+            else:
+                model_kwargs["torch_dtype"] = torch.float32
+
+            _glm_model = AutoModelForSeq2SeqLM.from_pretrained(GLM_ASR_MODEL_ID, **model_kwargs)
+
             if device == "cpu":
                 _glm_model = _glm_model.to(device)
+
+            try:
+                _glm_model.generation_config.use_cache = GLM_ASR_USE_CACHE
+            except Exception:
+                pass
             
             _glm_model_name = model_name
             t_load = time.perf_counter() - t_start
-            log_info(f"GLM-ASR model loaded in {t_load:.1f}s on {device.upper()}")
+            log_info(
+                f"GLM-ASR model loaded in {t_load:.1f}s on {device.upper()} "
+                f"(quant={GLM_ASR_QUANTIZATION}, dtype={GLM_ASR_DTYPE}, use_cache={GLM_ASR_USE_CACHE}, "
+                f"gpu_cap_gb={GLM_ASR_GPU_MEMORY_GB or 0})"
+            )
         
         return _glm_model, _glm_processor
 
@@ -474,7 +544,8 @@ def transcribe_with_glm(audio_path: str, model_name: str = None, language: str =
         outputs = model.generate(
             **inputs,
             do_sample=False,
-            max_new_tokens=500
+            max_new_tokens=GLM_ASR_MAX_NEW_TOKENS,
+            use_cache=GLM_ASR_USE_CACHE,
         )
         
         # Decode output
@@ -654,7 +725,7 @@ def is_parakeet_model(model_name: str) -> bool:
     return model_name.lower().startswith("parakeet")
 
 
-def is_legacy_glm_gguf_model(model_name: str) -> bool:
+def is_removed_glm_gguf_model(model_name: str) -> bool:
     """Check if model name refers to removed GLM-ASR GGUF backend."""
     if not model_name:
         return False
@@ -674,7 +745,7 @@ def transcribe(audio_path: str, model_name: str = None, language: str = "en") ->
     if model_name is None:
         model_name = f"whisper-{DEFAULT_WHISPER_MODEL}"
 
-    if is_legacy_glm_gguf_model(model_name):
+    if is_removed_glm_gguf_model(model_name):
         raise RuntimeError(
             "GLM-ASR GGUF backend has been removed. Use model='glm-asr-nano' instead."
         )
@@ -827,7 +898,7 @@ async def health_check():
 @app.post("/warmup")
 async def warmup(model: str = None):
     """Pre-load ASR model for faster first inference."""
-    if model and is_legacy_glm_gguf_model(model):
+    if model and is_removed_glm_gguf_model(model):
         raise HTTPException(
             status_code=400,
             detail="GLM-ASR GGUF backend has been removed. Use model='glm-asr-nano' instead.",
@@ -959,7 +1030,7 @@ async def live_transcription_websocket(
     use_parakeet = is_parakeet_model(effective_model)
     
     # Check backend availability
-    if is_legacy_glm_gguf_model(effective_model):
+    if is_removed_glm_gguf_model(effective_model):
         await websocket.send_json({
             "type": "error",
             "message": "GLM-ASR GGUF backend has been removed. Use model='glm-asr-nano' instead.",
@@ -1069,13 +1140,8 @@ async def live_transcription_websocket(
                     audio_samples_received += len(audio_float32)
                     
                     if call_mode:
-                        # Call mode: client handles endpointing and sends explicit flush.
-                        # Keep only max-buffer fallback for legacy clients.
-                        buffer_duration = accumulated_samples / sample_rate
-                        max_buffer_triggered = buffer_duration >= LIVE_CALL_MAX_BUFFER_SECONDS
-
-                        if max_buffer_triggered:
-                            await _flush_call_mode_buffer("max_buffer")
+                        # Call mode requires explicit client flush endpointing.
+                        pass
                     
                     else:
                         # Standard mode: process in chunks with partial updates
@@ -1205,10 +1271,10 @@ def transcribe_streaming(
         update_queue.put({"type": type_, **data})
     
     # Determine backend
-    use_legacy_glm_gguf = is_legacy_glm_gguf_model(model_name) if model_name else False
+    use_removed_glm_gguf = is_removed_glm_gguf_model(model_name) if model_name else False
     use_glm = is_glm_model(model_name) if model_name else False
     use_parakeet = is_parakeet_model(model_name) if model_name else False
-    if use_legacy_glm_gguf:
+    if use_removed_glm_gguf:
         raise RuntimeError("GLM-ASR GGUF backend has been removed. Use model='glm-asr-nano' instead.")
     
     # Load audio
@@ -1381,7 +1447,7 @@ async def transcribe_stream_endpoint(
     effective_model = model or f"whisper-{DEFAULT_WHISPER_MODEL}"
     
     # Check backend availability
-    if is_legacy_glm_gguf_model(effective_model):
+    if is_removed_glm_gguf_model(effective_model):
         raise HTTPException(
             status_code=400,
             detail="GLM-ASR GGUF backend has been removed. Use model='glm-asr-nano' instead.",
@@ -1522,7 +1588,7 @@ async def transcribe_endpoint(
     Transcribe audio. Compatible with OpenAI API format.
     
     Supported models:
-    - "glm-asr-nano": GLM-ASR-Nano-2512 via transformers (~3GB)
+    - "glm-asr-nano": GLM-ASR-Nano-2512 via transformers (~5GB fp16/bf16, lower with 8/4-bit quantization)
     - "parakeet-tdt-0.6b-v2": NVIDIA Parakeet via NeMo (CPU)
     - "parakeet-tdt-0.6b-v3": NVIDIA Parakeet via NeMo (CPU)
     - "whisper-large-v3-turbo": Whisper large-v3-turbo (default)
@@ -1532,7 +1598,7 @@ async def transcribe_endpoint(
     effective_model = model or f"whisper-{DEFAULT_WHISPER_MODEL}"
     
     # Check backend availability
-    if is_legacy_glm_gguf_model(effective_model):
+    if is_removed_glm_gguf_model(effective_model):
         raise HTTPException(
             status_code=400,
             detail="GLM-ASR GGUF backend has been removed. Use model='glm-asr-nano' instead.",
@@ -1677,7 +1743,7 @@ if __name__ == "__main__":
     if args.warmup:
         log_info("Warming up model...")
         try:
-            if args.warmup_model and is_legacy_glm_gguf_model(args.warmup_model):
+            if args.warmup_model and is_removed_glm_gguf_model(args.warmup_model):
                 log_warn("GLM-ASR GGUF backend has been removed. Warmup skipped for requested model.")
             elif args.warmup_model and is_glm_model(args.warmup_model):
                 load_glm_model()
@@ -1698,5 +1764,6 @@ if __name__ == "__main__":
         app,
         host=args.host,
         port=args.port,
-        log_level="warning",
+        log_level=os.getenv("VF_UVICORN_LOG_LEVEL", "warning").lower(),
+        access_log=_env_flag("VF_ACCESS_LOGS", "0"),
     )

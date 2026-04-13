@@ -9,6 +9,7 @@ Import and use these functions instead of raw logging/print statements.
 import warnings
 import logging
 import sys
+import os
 from typing import Optional
 
 # ============================================
@@ -69,12 +70,18 @@ def setup_logger(
 
 def log_info(msg: str, prefix: str = ""):
     """Log info message."""
+    level_name = os.getenv("VF_SERVER_LOG_LEVEL", "WARNING").strip().upper()
+    if level_name not in {"DEBUG", "INFO"}:
+        return
     tag = f"[{prefix}] " if prefix else ""
     print(f"{tag}{msg}", flush=True)
 
 
 def log_warn(msg: str, prefix: str = ""):
     """Log warning message."""
+    level_name = os.getenv("VF_SERVER_LOG_LEVEL", "WARNING").strip().upper()
+    if level_name not in {"DEBUG", "INFO", "WARNING"}:
+        return
     tag = f"[{prefix} WARNING] " if prefix else "[WARNING] "
     print(f"{tag}{msg}", flush=True)
 
@@ -87,6 +94,9 @@ def log_error(msg: str, prefix: str = ""):
 
 def log_debug(msg: str, prefix: str = ""):
     """Log debug message."""
+    level_name = os.getenv("VF_SERVER_LOG_LEVEL", "WARNING").strip().upper()
+    if level_name != "DEBUG":
+        return
     tag = f"[{prefix} DEBUG] " if prefix else "[DEBUG] "
     print(f"{tag}{msg}", flush=True)
 
@@ -197,11 +207,16 @@ def create_server_logger(
     Returns:
         Tuple of (log_info, log_warn, log_error) functions
     """
+    def _effective_level() -> str:
+        return os.getenv("VF_SERVER_LOG_LEVEL", "WARNING").strip().upper()
+
     def _log_info(msg: str):
-        print(f"[{server_name}] {msg}", flush=True)
+        if _effective_level() in {"DEBUG", "INFO"}:
+            print(f"[{server_name}] {msg}", flush=True)
     
     def _log_warn(msg: str):
-        print(f"[{server_name} WARNING] {msg}", flush=True)
+        if _effective_level() in {"DEBUG", "INFO", "WARNING"}:
+            print(f"[{server_name} WARNING] {msg}", flush=True)
     
     def _log_error(msg: str):
         print(f"[{server_name} ERROR] {msg}", flush=True)

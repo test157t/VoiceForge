@@ -908,6 +908,10 @@ async def current_model():
 
 if __name__ == "__main__":
     import argparse
+
+    def _env_flag(name: str, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8893, help="Port to bind to")
@@ -925,5 +929,12 @@ if __name__ == "__main__":
         logger.info("Pre-loading model...")
         get_model()
     
-    uvicorn.run(app, host=args.host, port=args.port, timeout_keep_alive=3600)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        timeout_keep_alive=3600,
+        log_level=os.getenv("VF_UVICORN_LOG_LEVEL", "warning").lower(),
+        access_log=_env_flag("VF_ACCESS_LOGS", "0"),
+    )
 

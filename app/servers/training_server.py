@@ -241,7 +241,7 @@ def parse_training_output(line: str, backend: str) -> Optional[Dict[str, Any]]:
     if audio_loss_match:
         progress["loss"] = float(audio_loss_match.group(1))
     elif "loss" not in progress:
-        # Generic loss fallback
+        # Generic loss extraction
         loss_match = re.search(r'[Ll]oss[:\s]+([\d.]+)', clean_line)
         if loss_match:
             progress["loss"] = float(loss_match.group(1))
@@ -1370,6 +1370,11 @@ async def websocket_training_progress(websocket: WebSocket):
 
 if __name__ == "__main__":
     import argparse
+
+    def _env_flag(name: str, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     parser = argparse.ArgumentParser(description="VoiceForge Training Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8895, help="Port to bind to")
@@ -1380,4 +1385,10 @@ if __name__ == "__main__":
     logger.info(f"Datasets directory: {DATASETS_DIR}")
     logger.info(f"Conda base: {CONDA_BASE}")
     
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=os.getenv("VF_UVICORN_LOG_LEVEL", "warning").lower(),
+        access_log=_env_flag("VF_ACCESS_LOGS", "0"),
+    )

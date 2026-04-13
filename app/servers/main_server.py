@@ -262,5 +262,6 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port,
         reload=args.reload,
+        log_level=os.getenv("VF_UVICORN_LOG_LEVEL", "warning").lower(),
         access_log=_env_flag("VF_ACCESS_LOGS", "0"),
     )

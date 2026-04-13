@@ -1,5 +1,5 @@
 @echo off
-:: OmniVoice server launcher
+:: OmniVoice ONNX CPU server launcher
 cd /d "%~dp0.."
 
 :: Find conda base directory
@@ -30,25 +30,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "OMNIVOICE_RUNTIME=torch"
-if /I "%~1"=="onnx" set "OMNIVOICE_RUNTIME=onnx-cpu"
+set "OMNIVOICE_RUNTIME=onnx-cpu"
+if not defined OMNIVOICE_MODEL_ID set "OMNIVOICE_MODEL_ID=gluschenko/omnivoice-onnx"
+if not defined OMNIVOICE_ONNX_MODEL_FILE set "OMNIVOICE_ONNX_MODEL_FILE=onnx/omnivoice.qint8.onnx"
 
-if /I "%OMNIVOICE_RUNTIME%"=="onnx-cpu" (
-    if not defined OMNIVOICE_MODEL_ID set "OMNIVOICE_MODEL_ID=gluschenko/omnivoice-onnx"
-    if not defined OMNIVOICE_ONNX_MODEL_FILE set "OMNIVOICE_ONNX_MODEL_FILE=onnx/omnivoice.qint8.onnx"
-)
-
-echo [INFO] Starting OmniVoice server...
-echo [INFO] Port: 8898
+echo [INFO] Starting OmniVoice ONNX server...
+echo [INFO] Port: 8899
 echo [INFO] Runtime: %OMNIVOICE_RUNTIME%
-if /I "%OMNIVOICE_RUNTIME%"=="onnx-cpu" echo [INFO] ONNX file: %OMNIVOICE_ONNX_MODEL_FILE%
+echo [INFO] Model: %OMNIVOICE_MODEL_ID%
+echo [INFO] ONNX file: %OMNIVOICE_ONNX_MODEL_FILE%
 echo.
 
 :: Run from the servers folder
 cd /d "%~dp0..\servers"
-python -X faulthandler -u omnivoice_server.py --port 8898
+python -X faulthandler -u omnivoice_server.py --port 8899
 if errorlevel 1 (
-    echo [ERROR] OmniVoice server crashed!
+    echo [ERROR] OmniVoice ONNX server crashed!
     pause
 )
 pause

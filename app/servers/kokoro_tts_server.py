@@ -295,9 +295,7 @@ def encode_audio(samples: np.ndarray, sample_rate: int, format: str = "wav") -> 
         return encode_audio(samples, sample_rate, "wav")
     
     elif format == "opus":
-        # For Opus, return WAV as fallback
-        logger.warning("Opus format requested but not implemented, returning WAV")
-        return encode_audio(samples, sample_rate, "wav")
+        raise HTTPException(status_code=400, detail="Opus format requested but not implemented")
     
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported format: {format}")
@@ -473,6 +471,10 @@ async def root():
 if __name__ == "__main__":
     import uvicorn
     import argparse
+
+    def _env_flag(name: str, default: str = "0") -> bool:
+        value = os.getenv(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
     
     parser = argparse.ArgumentParser(description="Kokoro TTS Server")
     parser.add_argument("--port", type=int, default=8896, help="Port to run on")
@@ -481,4 +483,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     logger.info(f"Starting Kokoro TTS Server on {args.host}:{args.port}")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=os.getenv("VF_UVICORN_LOG_LEVEL", "warning").lower(),
+        access_log=_env_flag("VF_ACCESS_LOGS", "0"),
+    )

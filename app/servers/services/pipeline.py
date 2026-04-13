@@ -25,6 +25,7 @@ from util.clients import (
     get_pocket_tts_client,
     get_kokoro_tts_client,
     get_omnivoice_tts_client,
+    get_omnivoice_onnx_tts_client,
     transcribe_audio,
     run_rvc,
     run_rvc_stream,
@@ -250,11 +251,31 @@ async def _get_omnivoice_ref_text_cached(
 
 
 def _get_tts_backend(request: TTSRequest) -> str:
-    """Get TTS backend from request. Supports chatterbox, pocket_tts, kokoro, and omnivoice."""
+    """Resolve TTS backend with server-side guardrails.
+
+    Some clients can accidentally send a stale default backend. If OmniVoice-specific
+    fields are present, prefer OmniVoice to avoid misrouting to Chatterbox.
+    """
+    allowed = ('chatterbox', 'pocket_tts', 'kokoro', 'omnivoice', 'omnivoice_onnx')
     backend = getattr(request, 'tts_backend', 'chatterbox')
-    if backend in ('chatterbox', 'pocket_tts', 'kokoro', 'omnivoice'):
-        return backend
-    return 'chatterbox'
+    if backend not in allowed:
+        backend = 'chatterbox'
+
+    # Strong OmniVoice signals: explicit ref-text/model or non-default voice value.
+    omni_ref_text = getattr(request, 'omnivoice_ref_text', None)
+    omni_ref_model = getattr(request, 'omnivoice_ref_asr_model', None)
+    omni_voice = str(getattr(request, 'omnivoice_voice', '') or '').strip()
+    has_omni_signal = bool(
+        (omni_ref_text and str(omni_ref_text).strip())
+        or (omni_ref_model and str(omni_ref_model).strip())
+        or (omni_voice and omni_voice.lower() not in {'auto', 'default', 'random'})
+    )
+
+    # If client requested chatterbox but sent OmniVoice fields, trust OmniVoice fields.
+    if backend == 'chatterbox' and has_omni_signal:
+        return 'omnivoice'
+
+    return backend
 
 
 @dataclass
@@ -336,7 +357,7 @@ async def generate_audio(
         elif tts_backend == "kokoro":
             # Kokoro uses voice presets (af, am, bf, bm)
             kokoro_voice = getattr(request, 'kokoro_voice', 'af_sarah')
-        elif tts_backend == "omnivoice":
+        elif tts_backend in {"omnivoice", "omnivoice_onnx"}:
             # OmniVoice uses auto/instruct text/or ref audio path
             omnivoice_voice = getattr(request, 'omnivoice_voice', 'auto')
             if omnivoice_voice and ('/' in omnivoice_voice or '\\' in omnivoice_voice or omnivoice_voice.endswith('.wav')):
@@ -394,11 +415,12 @@ async def generate_audio(
                 )
             )
             _log_verbose(f"[{request_id}] Kokoro TTS generated: {tts_path}")
-        elif tts_backend == "omnivoice":
-            _log_verbose(f"[{request_id}] Using OmniVoice with voice={omnivoice_voice}")
-            omnivoice_tts = get_omnivoice_tts_client()
+        elif tts_backend in {"omnivoice", "omnivoice_onnx"}:
+            is_onnx = tts_backend == "omnivoice_onnx"
+            _log_verbose(f"[{request_id}] Using OmniVoice{' ONNX' if is_onnx else ''} with voice={omnivoice_voice}")
+            omnivoice_tts = get_omnivoice_onnx_tts_client() if is_onnx else get_omnivoice_tts_client()
             _log_verbose(f"[{request_id}] OmniVoice client URL: {omnivoice_tts.server_url}")
-            status("Generating TTS with OmniVoice...")
+            status("Generating TTS with OmniVoice ONNX..." if is_onnx else "Generating TTS with OmniVoice...")
             max_tokens = request.tts_batch_tokens or 50
             token_method = request.tts_token_method or "tiktoken"
 
@@ -614,7 +636,7 @@ async def generate_audio_streaming(
         elif tts_backend == "kokoro":
             # Kokoro uses voice presets (af, am, bf, bm)
             kokoro_voice = getattr(request, 'kokoro_voice', 'af_sarah')
-        elif tts_backend == "omnivoice":
+        elif tts_backend in {"omnivoice", "omnivoice_onnx"}:
             omnivoice_voice = getattr(request, 'omnivoice_voice', 'auto')
             if omnivoice_voice and ('/' in omnivoice_voice or '\\' in omnivoice_voice or omnivoice_voice.endswith('.wav')):
                 resolved = resolve_audio_path(omnivoice_voice)
@@ -838,13 +860,14 @@ async def generate_audio_streaming(
 
                     _log_verbose(f"[{request_id}] Stream done, {event_count} events")
 
-                elif tts_backend == "omnivoice":
-                    omnivoice_tts = get_omnivoice_tts_client()
+                elif tts_backend in {"omnivoice", "omnivoice_onnx"}:
+                    is_onnx = tts_backend == "omnivoice_onnx"
+                    omnivoice_tts = get_omnivoice_onnx_tts_client() if is_onnx else get_omnivoice_tts_client()
                     omnivoice_voice = getattr(request, 'omnivoice_voice', 'auto')
                     max_tokens = request.tts_batch_tokens or 50
                     token_method = request.tts_token_method or "tiktoken"
 
-                    _log_verbose(f"[{request_id}] OmniVoice streaming - voice={omnivoice_voice}")
+                    _log_verbose(f"[{request_id}] OmniVoice{' ONNX' if is_onnx else ''} streaming - voice={omnivoice_voice}")
                     text_chunks = split_text(
                         request.input,
                         max_tokens=max_tokens,

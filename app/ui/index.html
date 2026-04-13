@@ -128,13 +128,14 @@
                     <div class="form-group">
                         <label for="tts-backend" class="label-with-help">
                             TTS Backend
-                            <span class="help-icon" title="Select TTS engine. Chatterbox offers voice cloning with prompt audio. Pocket TTS is lightweight with built-in voices. Kokoro is a fast ONNX-based TTS. OmniVoice supports auto voice, voice design, and prompt-based cloning.">?</span>
+                            <span class="help-icon" title="Select TTS engine. Chatterbox offers voice cloning with prompt audio. Pocket TTS is lightweight with built-in voices. Kokoro is a fast ONNX-based TTS. OmniVoice supports auto voice, voice design, and prompt-based cloning. OmniVoice ONNX runs the ONNX CPU server.">?</span>
                         </label>
             <select id="tts-backend" onchange="updateTTSBackendVisibility()">
               <option value="chatterbox">Chatterbox (Voice Cloning)</option>
               <option value="pocket_tts">Pocket TTS (Lightweight)</option>
               <option value="kokoro">Kokoro (Fast ONNX)</option>
               <option value="omnivoice">OmniVoice (Multilingual)</option>
+              <option value="omnivoice_onnx">OmniVoice ONNX (CPU)</option>
             </select>
                     </div>
 
@@ -2025,7 +2026,7 @@
           const isChatterbox = backend === 'chatterbox';
           const isPocketTTS = backend === 'pocket_tts';
           const isKokoro = backend === 'kokoro';
-          const isOmniVoice = backend === 'omnivoice';
+          const isOmniVoice = backend === 'omnivoice' || backend === 'omnivoice_onnx';
 
           // Chatterbox sections
           const voiceCloningSection = document.getElementById('chatterbox-voice-cloning-section');
@@ -2525,7 +2526,7 @@
           const hasSavedPath = window.lastChatterboxPromptPath;
 
           // Pocket TTS, Kokoro, and OmniVoice don't require prompt audio
-          if (ttsBackend === 'pocket_tts' || ttsBackend === 'kokoro' || ttsBackend === 'omnivoice') {
+          if (ttsBackend === 'pocket_tts' || ttsBackend === 'kokoro' || ttsBackend === 'omnivoice' || ttsBackend === 'omnivoice_onnx') {
             // No prompt audio validation needed for these backends
           } else {
             // Chatterbox requires prompt audio
@@ -2580,7 +2581,7 @@
             }
             
             // Handle prompt audio upload/selection for voice cloning (Chatterbox + OmniVoice)
-            if (ttsBackend === 'chatterbox' || ttsBackend === 'omnivoice') {
+            if (ttsBackend === 'chatterbox' || ttsBackend === 'omnivoice' || ttsBackend === 'omnivoice_onnx') {
                 const promptAudioInput = document.getElementById('chatterbox-prompt-audio');
                 const promptSelect = document.getElementById('audio-prompt-select');
                 const hasNewFile = promptAudioInput && promptAudioInput.files && promptAudioInput.files.length > 0;
