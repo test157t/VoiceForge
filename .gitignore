@@ -50,3 +50,5 @@ voiceforge_tailscale_https.bat
 /app/models/rvc_user/Femme Fatalel
 /app/models/rvc_user/FrivolousFox
 /app/models/rvc_user/Nicki Nicole
+app/models/omnivoice/onnx/omnivoice.qint8.onnx
+app/models/omnivoice/onnx/omnivoice.qint8.onnx_data

@@ -27,9 +27,9 @@ class TTSRequest(BaseModel):
         default="chunked",
         description="Generation mode: 'chunked' (wait for complete) or 'streaming' (progressive)"
     )
-    tts_backend: Literal["chatterbox", "pocket_tts", "kokoro", "omnivoice", "omnivoice_onnx"] = Field(
+    tts_backend: Literal["chatterbox", "pocket_tts", "kokoro", "omnivoice", "omnivoice_onnx", "omnivoice_onnx_gpu"] = Field(
         default="chatterbox",
-        description="TTS backend: chatterbox, pocket_tts, kokoro, omnivoice, or omnivoice_onnx"
+        description="TTS backend: chatterbox, pocket_tts, kokoro, omnivoice, omnivoice_onnx, or omnivoice_onnx_gpu"
     )
     tts_batch_tokens: int = Field(default=100, description="Max tokens per TTS batch")
     tts_token_method: str = Field(default="tiktoken", description="Token counting method")

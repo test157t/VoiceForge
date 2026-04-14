@@ -128,7 +128,6 @@ CHATTERBOX_SERVER_URL = normalize_base_url(os.getenv("CHATTERBOX_SERVER_URL", "1
 POCKET_TTS_SERVER_URL = normalize_base_url(os.getenv("POCKET_TTS_SERVER_URL", "127.0.0.1:8894"))
 KOKORO_TTS_SERVER_URL = normalize_base_url(os.getenv("KOKORO_TTS_SERVER_URL", "127.0.0.1:8897"))
 OMNIVOICE_TTS_SERVER_URL = normalize_base_url(os.getenv("OMNIVOICE_TTS_SERVER_URL", "127.0.0.1:8898"))
-OMNIVOICE_ONNX_TTS_SERVER_URL = normalize_base_url(os.getenv("OMNIVOICE_ONNX_TTS_SERVER_URL", "127.0.0.1:8899"))
 
 AUDIO_SERVICES_SERVER_URL = normalize_base_url(os.getenv("AUDIO_SERVICES_SERVER_URL", "127.0.0.1:8892"))
 POSTPROCESS_SERVER_URL = normalize_base_url(os.getenv("POSTPROCESS_SERVER_URL", AUDIO_SERVICES_SERVER_URL))
@@ -2472,9 +2471,10 @@ class OmniVoiceTTSClient(BaseServiceClient):
     - OpenAI-compatible /v1/audio/speech API
     """
 
-    def __init__(self, server_url: str = None):
+    def __init__(self, server_url: str = None, runtime: Optional[str] = None):
         super().__init__(server_url or OMNIVOICE_TTS_SERVER_URL)
         self._server_available = None
+        self.runtime = (runtime or "").strip() or None
 
     def is_available(self) -> bool:
         """Check if OmniVoice server is available (with caching)."""
@@ -2524,6 +2524,8 @@ class OmniVoiceTTSClient(BaseServiceClient):
                 "token_method": token_method,
                 "prechunked": bool(prechunked),
             }
+            if self.runtime:
+                payload["runtime"] = self.runtime
             if ref_text and ref_text.strip():
                 payload["ref_text"] = ref_text.strip()
 
@@ -2586,6 +2588,8 @@ class OmniVoiceTTSClient(BaseServiceClient):
             "max_tokens": max_tokens,
             "token_method": token_method,
         }
+        if self.runtime:
+            payload["runtime"] = self.runtime
         if request_id:
             payload["request_id"] = request_id
 
@@ -2659,6 +2663,7 @@ _pocket_tts_client = None
 _kokoro_tts_client = None
 _omnivoice_tts_client = None
 _omnivoice_onnx_tts_client = None
+_omnivoice_onnx_gpu_tts_client = None
 
 
 # ASR helpers (Whisper - default)
@@ -3340,7 +3345,7 @@ def get_omnivoice_tts_client() -> OmniVoiceTTSClient:
     """Get or create the global OmniVoice TTS client."""
     global _omnivoice_tts_client
     if _omnivoice_tts_client is None:
-        _omnivoice_tts_client = OmniVoiceTTSClient()
+        _omnivoice_tts_client = OmniVoiceTTSClient(runtime="torch")
     return _omnivoice_tts_client
 
 
@@ -3353,13 +3358,32 @@ def get_omnivoice_onnx_tts_client() -> OmniVoiceTTSClient:
     """Get or create the global OmniVoice ONNX TTS client."""
     global _omnivoice_onnx_tts_client
     if _omnivoice_onnx_tts_client is None:
-        _omnivoice_onnx_tts_client = OmniVoiceTTSClient(server_url=OMNIVOICE_ONNX_TTS_SERVER_URL)
+        _omnivoice_onnx_tts_client = OmniVoiceTTSClient(
+            server_url=OMNIVOICE_TTS_SERVER_URL,
+            runtime="onnx-cpu",
+        )
     return _omnivoice_onnx_tts_client
 
 
 def is_omnivoice_onnx_tts_server_available() -> bool:
     """Check if OmniVoice ONNX TTS server is available."""
     return get_omnivoice_onnx_tts_client().is_available()
+
+
+def get_omnivoice_onnx_gpu_tts_client() -> OmniVoiceTTSClient:
+    """Get or create the global OmniVoice ONNX GPU TTS client."""
+    global _omnivoice_onnx_gpu_tts_client
+    if _omnivoice_onnx_gpu_tts_client is None:
+        _omnivoice_onnx_gpu_tts_client = OmniVoiceTTSClient(
+            server_url=OMNIVOICE_TTS_SERVER_URL,
+            runtime="onnx-gpu",
+        )
+    return _omnivoice_onnx_gpu_tts_client
+
+
+def is_omnivoice_onnx_gpu_tts_server_available() -> bool:
+    """Check if OmniVoice ONNX GPU TTS server is available."""
+    return get_omnivoice_onnx_gpu_tts_client().is_available()
 
 
 # Export all public symbols
@@ -3417,6 +3441,8 @@ __all__ = [
     'is_omnivoice_tts_server_available',
     'get_omnivoice_onnx_tts_client',
     'is_omnivoice_onnx_tts_server_available',
+    'get_omnivoice_onnx_gpu_tts_client',
+    'is_omnivoice_onnx_gpu_tts_server_available',
     # Server URLs
     'get_shared_session',
     'WHISPERASR_SERVER_URL',
@@ -3426,6 +3452,5 @@ __all__ = [
     'POCKET_TTS_SERVER_URL',
     'KOKORO_TTS_SERVER_URL',
     'OMNIVOICE_TTS_SERVER_URL',
-    'OMNIVOICE_ONNX_TTS_SERVER_URL',
     'AUDIO_SERVICES_SERVER_URL',
 ]
